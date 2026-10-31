@@ -8,3 +8,7 @@ class DeviceOffline(Exception):
 
 class CommandRejected(Exception):
     pass
+
+
+class DeviceTypeConflict(Exception):
+    pass

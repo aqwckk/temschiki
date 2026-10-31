@@ -18,6 +18,8 @@ class SignalDeclaration(BaseModel):
     min: Optional[float] = None
     max: Optional[float] = None
     layout: Optional[dict[str, str]] = None
+    default: Optional[Union[int, float]] = None
+    affects: Optional[str] = None
 
 
 class InputDeclaration(BaseModel):
@@ -29,6 +31,7 @@ class InputDeclaration(BaseModel):
 class DeviceType(BaseModel):
     family: str
     title: str
+    builtin: bool
     signals: list[SignalDeclaration]
     inputs: list[InputDeclaration]
 

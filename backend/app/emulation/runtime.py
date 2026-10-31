@@ -7,7 +7,6 @@ from typing import Any, Callable, Optional
 
 from app.emulation import registry
 from app.emulation.errors import CommandRejected, DeviceNotRunning, DeviceOffline
-from app.emulation.inputs import find_input
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +74,7 @@ class EmulatorRuntime:
     def simulate(self, device_id: int, input_name: str, value: Any) -> None:
         with self._lock:
             slot = self._get_online_slot(device_id)
-            physical = find_input(slot.family, input_name)
+            physical = registry.find_input(slot.family, input_name)
             if physical is None:
                 raise CommandRejected(f"у устройства нет физического входа {input_name}")
             changes = _collect_changes(slot, lambda: physical.apply(slot.emulator, value))

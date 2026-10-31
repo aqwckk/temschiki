@@ -10,6 +10,7 @@ from app.realtime import events
 from app.realtime.hub import hub
 from app.routers import device_types, devices, journal, realtime, scenarios, ujin
 from app.scenarios.engine import engine
+from app.services import device_types as device_type_service
 from app.services import devices as device_service
 from app.services import scenarios as scenario_service
 from app.ujin.mirror import mirror
@@ -24,6 +25,7 @@ async def lifespan(app: FastAPI):
     runtime.subscribe(events.publish_signal)
     runtime.subscribe(mirror.on_signal)
     with SessionLocal() as session:
+        device_type_service.register_all(session)
         device_service.start_all(session)
         engine.start(loop, scenario_service.list_scenarios(session))
     await runtime.start()

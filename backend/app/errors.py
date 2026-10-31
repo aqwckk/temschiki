@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from app.emulation.errors import CommandRejected, DeviceNotRunning, DeviceOffline
+from app.emulation.errors import CommandRejected, DeviceNotRunning, DeviceOffline, DeviceTypeConflict
 from app.scenarios.errors import ScenarioInvalid
 
 # доменная ошибка -> HTTP-статус
@@ -9,6 +9,7 @@ STATUS_BY_ERROR = {
     DeviceNotRunning: 503,
     DeviceOffline: 409,
     CommandRejected: 400,
+    DeviceTypeConflict: 409,
     ScenarioInvalid: 422,
 }
 

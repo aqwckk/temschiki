@@ -20,6 +20,16 @@ class Device(Base):
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
 
 
+class CustomDeviceType(Base):
+    __tablename__ = "custom_device_types"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    family: Mapped[str] = mapped_column(String(32), unique=True)
+    title: Mapped[str] = mapped_column(String(100))
+    signals: Mapped[list] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+
 class Scenario(Base):
     __tablename__ = "scenarios"
 

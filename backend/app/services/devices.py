@@ -3,6 +3,8 @@ from typing import Optional
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.emulation.runtime import runtime
+from app.scenarios.engine import engine
 from app.models import Device
 from app.schemas import DeviceCreate, DeviceUpdate
 
@@ -19,6 +21,8 @@ def create_device(session: Session, data: DeviceCreate) -> Device:
     device = Device(name=data.name, family=data.family)
     session.add(device)
     session.commit()
+    engine.forget_device(device.id)
+    runtime.add(device.id, device.family)
     return device
 
 
@@ -29,5 +33,13 @@ def update_device(session: Session, device: Device, data: DeviceUpdate) -> Devic
 
 
 def delete_device(session: Session, device: Device) -> None:
+    runtime.remove(device.id)
+    engine.forget_device(device.id)
     session.delete(device)
     session.commit()
+
+
+def start_all(session: Session) -> None:
+    # при старте сервера поднимаем эмуляторы всех устройств из базы
+    for device in list_devices(session):
+        runtime.add(device.id, device.family)

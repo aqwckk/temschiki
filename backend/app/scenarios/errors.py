@@ -1,0 +1,2 @@
+class ScenarioInvalid(Exception):
+    pass

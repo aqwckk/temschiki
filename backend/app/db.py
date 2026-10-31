@@ -18,6 +18,6 @@ def get_session():
 
 def init_db() -> None:
     # импорт нужен, чтобы таблицы попали в metadata
-    from app import models  # noqa: F401
+    from app import models
 
     Base.metadata.create_all(engine)

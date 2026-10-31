@@ -2,13 +2,14 @@
 import sys
 
 from app.config import settings
+from app.emulation.inputs import inputs_for
 
 # модули эмуляторов импортируют друг друга как top-level (from core import ...)
 _emulators_path = str(settings.emulators_dir)
 if _emulators_path not in sys.path:
     sys.path.insert(0, _emulators_path)
 
-from devices import REGISTRY  # noqa: E402
+from devices import REGISTRY
 
 
 def _silent(message: str) -> None:
@@ -36,7 +37,16 @@ def _normalize_signal(declaration: dict) -> dict:
     return declaration
 
 
+def find_signal(family: str, name: str):
+    emulator = create_emulator(family)
+    return emulator.signals.get(name)
+
+
 def describe(family: str) -> dict:
     emulator = create_emulator(family)
     signals = [_normalize_signal(item) for item in emulator.declaration()]
-    return {"family": family, "title": emulator.title, "signals": signals}
+    physical = [
+        {"name": item.name, "title": item.title, "value_type": item.value_type}
+        for item in inputs_for(family)
+    ]
+    return {"family": family, "title": emulator.title, "signals": signals, "inputs": physical}

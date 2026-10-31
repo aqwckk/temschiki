@@ -1,9 +1,10 @@
 from datetime import datetime
-from typing import Literal, Optional
+from typing import Any, Literal, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.emulation import registry
+from app.scenarios.blocks import ACTION_KINDS, Block
 
 
 class SignalDeclaration(BaseModel):
@@ -19,10 +20,17 @@ class SignalDeclaration(BaseModel):
     layout: Optional[dict[str, str]] = None
 
 
+class InputDeclaration(BaseModel):
+    name: str
+    title: str
+    value_type: Literal["bool", "number"]
+
+
 class DeviceType(BaseModel):
     family: str
     title: str
     signals: list[SignalDeclaration]
+    inputs: list[InputDeclaration]
 
 
 class DeviceCreate(BaseModel):
@@ -51,4 +59,82 @@ class DeviceRead(BaseModel):
     id: int
     name: str
     family: str
+    created_at: datetime
+    online: bool = False
+
+
+class DeviceState(BaseModel):
+    device_id: int
+    online: bool
+    values: dict[str, Any]
+
+
+class CommandIn(BaseModel):
+    signal: str = Field(min_length=1)
+    value: Union[int, float]
+
+
+class SimulateIn(BaseModel):
+    input: str = Field(min_length=1)
+    value: Union[int, float]
+
+
+class PowerIn(BaseModel):
+    online: bool
+
+
+class ScenarioIn(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    title: str = Field(min_length=1, max_length=100)
+    enabled: bool = True
+    blocks: list[Block]
+
+    @model_validator(mode="after")
+    def needs_trigger_and_action(self):
+        kinds = [block.kind for block in self.blocks]
+        if "trigger" not in kinds:
+            raise ValueError("в сценарии нужен хотя бы один блок trigger")
+        if not any(kind in ACTION_KINDS for kind in kinds):
+            raise ValueError("в сценарии нужно хотя бы одно действие")
+        return self
+
+
+class ScenarioRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    title: str
+    enabled: bool
+    blocks: list[Block]
+    created_at: datetime
+
+
+class RunStep(BaseModel):
+    block_id: str
+    kind: str
+    ok: bool
+    error: str = ""
+
+
+class ScenarioRunRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    scenario_id: int
+    cause: str
+    status: Literal["success", "failed", "skipped"]
+    reason: str
+    steps: list[RunStep]
+    started_at: datetime
+    finished_at: datetime
+
+
+class NotificationRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    target: str
+    message: str
+    scenario_id: Optional[int]
     created_at: datetime

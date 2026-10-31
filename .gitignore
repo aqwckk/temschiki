@@ -1,0 +1,101 @@
+# Local credentials and organizer access booklet
+доступы.json
+доступы*.json
+*.pdf
+credentials.json
+credentials.local.json
+secrets.json
+secrets.local.json
+.secrets/
+
+# Environment files; templates may be committed without real secrets
+.env
+.env.*
+!.env.example
+!.env.*.example
+!.env.template
+
+# Private keys and local certificates
+*.pem
+*.key
+*.p12
+*.pfx
+*.keystore
+id_rsa
+id_ed25519
+
+# Python environments, caches and build metadata
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+*.egg-info/
+.eggs/
+
+# JavaScript / React dependencies and caches
+node_modules/
+.npm/
+.pnpm-store/
+.yarn/cache/
+.yarn/unplugged/
+.vite/
+*.tsbuildinfo
+
+# Build outputs, including future desktop and mobile apps
+dist/
+build/
+out/
+release/
+.expo/
+web-build/
+.gradle/
+local.properties
+Pods/
+DerivedData/
+xcuserdata/
+*.xcuserstate
+*.apk
+*.aab
+*.ipa
+*.dmg
+*.app/
+
+# Test reports and coverage
+coverage/
+htmlcov/
+.coverage
+.coverage.*
+test-results/
+playwright-report/
+
+# Local logs, databases and temporary files
+*.log
+*.pid
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+tmp/
+temp/
+*.tmp
+*.swp
+*.swo
+*~
+
+# OS and editor files
+.DS_Store
+._*
+Thumbs.db
+Desktop.ini
+.idea/
+.vscode/
+
+

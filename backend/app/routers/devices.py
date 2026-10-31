@@ -91,5 +91,5 @@ def simulate(data: SimulateIn, device: Device = Depends(get_existing_device)):
 
 @router.put("/{device_id}/power", response_model=DeviceState)
 def set_power(data: PowerIn, device: Device = Depends(get_existing_device)):
-    runtime.set_online(device.id, data.online)
+    service.set_power(device, data.online)
     return to_state(device)

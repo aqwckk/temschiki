@@ -57,6 +57,13 @@ class EmulatorRuntime:
             slot = self._get_slot(device_id)
             return _snapshot(slot)
 
+    def all_states(self) -> list[dict]:
+        with self._lock:
+            return [
+                {"device_id": device_id, "online": slot.online, "values": _snapshot(slot)}
+                for device_id, slot in self._slots.items()
+            ]
+
     def command(self, device_id: int, signal: str, value: Any) -> None:
         with self._lock:
             slot = self._get_online_slot(device_id)
@@ -86,7 +93,8 @@ class EmulatorRuntime:
             self._notify(device_id, changes)
 
     def subscribe(self, listener: Listener) -> None:
-        self._listeners.append(listener)
+        if listener not in self._listeners:
+            self._listeners.append(listener)
 
     async def start(self) -> None:
         if self._task is None:

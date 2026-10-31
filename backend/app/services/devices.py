@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from app.emulation.runtime import runtime
 from app.scenarios.engine import engine
 from app.models import Device
+from app.realtime import events
 from app.schemas import DeviceCreate, DeviceUpdate
 
 
@@ -37,6 +38,11 @@ def delete_device(session: Session, device: Device) -> None:
     engine.forget_device(device.id)
     session.delete(device)
     session.commit()
+
+
+def set_power(device: Device, online: bool) -> None:
+    runtime.set_online(device.id, online)
+    events.publish_device_status(device.id, online)
 
 
 def start_all(session: Session) -> None:

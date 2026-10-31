@@ -7,6 +7,8 @@ from sqlalchemy.orm import Session
 
 from app.db import SessionLocal
 from app.models import Notification, ScenarioRun
+from app.realtime import events
+from app.schemas import NotificationRead, ScenarioRunRead
 
 
 def save_run(
@@ -28,12 +30,15 @@ def save_run(
         )
         session.add(run)
         session.commit()
+        events.publish_run(ScenarioRunRead.model_validate(run).model_dump(mode="json"))
 
 
 def add_notification(target: str, message: str, scenario_id: Optional[int] = None) -> None:
     with SessionLocal() as session:
-        session.add(Notification(target=target, message=message, scenario_id=scenario_id))
+        notification = Notification(target=target, message=message, scenario_id=scenario_id)
+        session.add(notification)
         session.commit()
+        events.publish_notification(NotificationRead.model_validate(notification).model_dump(mode="json"))
 
 
 def list_runs(session: Session, scenario_id: Optional[int] = None, limit: int = 50) -> list[ScenarioRun]:

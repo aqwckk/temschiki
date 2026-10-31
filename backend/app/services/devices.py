@@ -8,6 +8,7 @@ from app.scenarios.engine import engine
 from app.models import Device
 from app.realtime import events
 from app.schemas import DeviceCreate, DeviceUpdate
+from app.ujin.mirror import mirror
 
 
 def list_devices(session: Session) -> list[Device]:
@@ -23,7 +24,7 @@ def create_device(session: Session, data: DeviceCreate) -> Device:
     session.add(device)
     session.commit()
     engine.forget_device(device.id)
-    runtime.add(device.id, device.family)
+    _start(device)
     return device
 
 
@@ -35,6 +36,7 @@ def update_device(session: Session, device: Device, data: DeviceUpdate) -> Devic
 
 def delete_device(session: Session, device: Device) -> None:
     runtime.remove(device.id)
+    mirror.unbind(device.id)
     engine.forget_device(device.id)
     session.delete(device)
     session.commit()
@@ -48,4 +50,9 @@ def set_power(device: Device, online: bool) -> None:
 def start_all(session: Session) -> None:
     # при старте сервера поднимаем эмуляторы всех устройств из базы
     for device in list_devices(session):
-        runtime.add(device.id, device.family)
+        _start(device)
+
+
+def _start(device: Device) -> None:
+    runtime.add(device.id, device.family)
+    mirror.bind(device.id, device.family, runtime.values(device.id))

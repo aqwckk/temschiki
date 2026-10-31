@@ -1,15 +1,7 @@
 """Доступ к семействам эмуляторов из папки emulators/."""
-import sys
-
-from app.config import settings
-from app.emulation.inputs import inputs_for
-
-# модули эмуляторов импортируют друг друга как top-level (from core import ...)
-_emulators_path = str(settings.emulators_dir)
-if _emulators_path not in sys.path:
-    sys.path.insert(0, _emulators_path)
-
 from devices import REGISTRY
+
+from app.emulation.inputs import inputs_for
 
 
 def _silent(message: str) -> None:

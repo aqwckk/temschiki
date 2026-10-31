@@ -130,6 +130,22 @@ class ScenarioRunRead(BaseModel):
     finished_at: datetime
 
 
+class UjinBinding(BaseModel):
+    device_id: int
+    family: str
+    ext: str
+    serialnumber: str
+
+
+class UjinStatus(BaseModel):
+    mode: Literal["dry", "live"]
+    enabled: bool
+    bindings: list[UjinBinding]
+    published: int
+    last_flush_at: Optional[datetime]
+    last_error: str
+
+
 class NotificationRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

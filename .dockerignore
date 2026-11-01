@@ -1,0 +1,13 @@
+.git
+.idea
+.vscode
+**/node_modules
+**/dist
+**/.venv
+**/__pycache__
+**/*.db
+**/.env
+**/.env.*
+**/доступы*.json
+secrets
+backend/tests

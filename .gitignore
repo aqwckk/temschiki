@@ -7,6 +7,7 @@ credentials.local.json
 secrets.json
 secrets.local.json
 .secrets/
+secrets/
 
 # Environment files; templates may be committed without real secrets
 .env

@@ -1,4 +1,10 @@
-"""Зеркало на платформу Ujin: наши устройства публикуют сигналы в устройства стенда."""
+"""Зеркало на платформу Ujin.
+
+Вверх: наши устройства публикуют сигналы в устройства стенда от имени сотрудника УК.
+Вниз: команды из кабинета применяются к эмуляторам. Сигналы integrations_devices_*
+через get-device-info не видны (автословари скрыты), доставку подтверждает только
+панель сигналов, поэтому чтение используется для команд, а не для проверки.
+"""
 import asyncio
 import logging
 import threading
@@ -9,6 +15,8 @@ from typing import Any, Optional
 
 from app.config import settings
 from app.emulation import registry
+from app.emulation.runtime import runtime
+from app.ujin import auth
 from app.ujin import credentials as credentials_module
 from app.ujin.credentials import UjinCredentials, UjinDevice
 
@@ -16,6 +24,8 @@ from app.ujin.credentials import UjinCredentials, UjinDevice
 from ujin_client import UjinClient
 
 logger = logging.getLogger(__name__)
+
+PUBLISH_CLASS = "integrations_devices"
 
 
 class QuietUjinClient(UjinClient):
@@ -32,39 +42,38 @@ class Binding:
     target: UjinDevice
     announced: bool = False
     pending: dict[str, Any] = field(default_factory=dict)
+    remote: dict[str, Any] = field(default_factory=dict)
+    seen_tasks: dict[str, str] = field(default_factory=dict)
 
 
 class UjinMirror:
     def __init__(self):
         self.mode = settings.ujin_mode
         self.credentials: Optional[UjinCredentials] = None
-        self.client: Optional[UjinClient] = None
+        self._token = ""
         self._bindings: dict[int, Binding] = {}
         self._lock = threading.Lock()
         self._task: Optional[asyncio.Task] = None
         self.published = 0
         self.last_flush_at: Optional[datetime] = None
+        self.last_readback_at: Optional[datetime] = None
         self.last_error = ""
+        self.auth_message = ""
+        self.commands_applied = 0
+        self.last_command = ""
 
     @property
     def enabled(self) -> bool:
         return self.credentials is not None
 
+    @property
+    def live(self) -> bool:
+        return self.mode == "live"
+
     def load_credentials(self) -> None:
         self.credentials = credentials_module.load(settings.ujin_credentials_file)
         if self.credentials is None:
             logger.warning("файл доступов Ujin не найден, зеркало выключено")
-            return
-        self.client = QuietUjinClient(
-            settings.ujin_base_url,
-            device_token="",
-            dry_run=self.mode == "dry",
-            logger=logger.debug,
-            cls="integrations_devices",
-            signal_prefix="integrations_devices_",
-            ust=self.credentials.ust,
-            apartment_id=self.credentials.apartment_id,
-        )
 
     def bind(self, device_id: int, family: str, values: dict[str, Any]) -> None:
         """Привязывает устройство к устройству стенда того же семейства, если оно свободно."""
@@ -93,21 +102,17 @@ class UjinMirror:
 
     def status(self) -> dict:
         with self._lock:
-            bindings = [
-                {
-                    "device_id": binding.device_id,
-                    "family": binding.family,
-                    "ext": binding.target.ext,
-                    "serialnumber": binding.target.serialnumber,
-                }
-                for binding in self._bindings.values()
-            ]
+            bindings = [_binding_status(binding) for binding in self._bindings.values()]
         return {
             "mode": self.mode,
             "enabled": self.enabled,
+            "auth": self.auth_message,
             "bindings": bindings,
             "published": self.published,
             "last_flush_at": self.last_flush_at,
+            "last_readback_at": self.last_readback_at,
+            "commands_applied": self.commands_applied,
+            "last_command": self.last_command,
             "last_error": self.last_error,
         }
 
@@ -135,35 +140,142 @@ class UjinMirror:
         with self._lock:
             work = []
             for binding in self._bindings.values():
-                if binding.pending:
-                    work.append((binding, dict(binding.pending)))
-                    binding.pending.clear()
+                work.append((binding, dict(binding.pending)))
+                binding.pending.clear()
         for binding, rows in work:
-            self._publish(binding, rows)
+            if rows:
+                self._publish(binding, rows)
+            if self.live:
+                self._read_back(binding)
         self.last_flush_at = datetime.now(timezone.utc)
+
+    def _token_for_requests(self) -> str:
+        """ust сотрудника УК, если он есть в доступах, иначе ust резидента."""
+        if not self.live or self.credentials.employee is None:
+            return self.credentials.ust
+        if not self._token:
+            try:
+                self._token = auth.login(settings.ujin_base_url, self.credentials.employee)
+                self.auth_message = "вход сотрудника выполнен"
+            except Exception as exc:
+                self.auth_message = f"вход сотрудника не удался: {exc}"
+                return self.credentials.ust
+        return self._token
+
+    def _client(self, target: UjinDevice) -> UjinClient:
+        return QuietUjinClient(
+            settings.ujin_base_url,
+            device_token="",
+            dry_run=not self.live,
+            logger=logger.debug,
+            cls=PUBLISH_CLASS,
+            signal_prefix=PUBLISH_CLASS + "_",
+            ust=self._token_for_requests(),
+            apartment_id=target.apartment_id,
+        )
 
     def _publish(self, binding: Binding, rows: dict[str, Any]) -> None:
         target = binding.target
         try:
+            client = self._client(target)
             if not binding.announced:
-                self._announce(binding)
+                self._announce(client, binding)
             batch = [{"signal": name, "value": value} for name, value in rows.items()]
-            response = self.client.update_signals(target.ext, target.model, batch)
+            response = client.update_signals(target.ext, target.model, batch)
             if response.get("error"):
-                self.last_error = f"{target.ext}: {response.get('message')}"
+                self._fail(f"{target.ext}: {response.get('message')}")
                 return
             self.published += len(batch)
         except Exception as exc:
-            self.last_error = f"{target.ext}: {exc}"
-            logger.warning("публикация в Ujin не удалась: %s", exc)
+            self._fail(f"{target.ext}: {exc}")
 
-    def _announce(self, binding: Binding) -> None:
+    def _announce(self, client: UjinClient, binding: Binding) -> None:
         # новый сигнал на стенде сначала создается коротким именем, иначе значение теряется
         target = binding.target
         names = _publishable_names(binding.family)
         rows = [{"sn": target.ext, "s": name, "v": 0.001, "c": target.publish_class} for name in names]
-        self.client.publish_group([], new_short=rows)
+        client.publish_group([], new_short=rows)
         binding.announced = True
+
+    def _read_back(self, binding: Binding) -> None:
+        """Читает устройство со стенда и забирает команды из кабинета."""
+        target = binding.target
+        try:
+            info = self._client(target).get_device_info(self._token_for_requests(), target.serialnumber)
+        except Exception as exc:
+            self._fail(f"чтение {target.ext}: {exc}")
+            return
+        if not isinstance(info, dict) or info.get("error"):
+            self._fail(f"чтение {target.ext}: {info.get('message')}")
+            return
+        binding.remote = _remote_values(info)
+        self.last_readback_at = datetime.now(timezone.utc)
+        self._apply_tasks(binding, info)
+
+    def _apply_tasks(self, binding: Binding, info: dict) -> None:
+        for name, value in UjinClient.pending_tasks(info).items():
+            key = _task_key(info, name) or f"{name}={value}"
+            # одна и та же команда исполняется один раз
+            if binding.seen_tasks.get(name) == key:
+                continue
+            binding.seen_tasks[name] = key
+            short = _short_name(name)
+            try:
+                runtime.command(binding.device_id, short, _number(value))
+                self.commands_applied += 1
+                self.last_command = f"{binding.target.ext}: {short} = {value}"
+            except Exception as exc:
+                self.last_command = f"{binding.target.ext}: {short} не выполнена ({exc})"
+
+    def _fail(self, message: str) -> None:
+        self.last_error = message
+        logger.warning("Ujin: %s", message)
+        # возможно, истек токен сотрудника: в следующий раз войдем заново
+        self._token = ""
+
+
+def _binding_status(binding: Binding) -> dict:
+    return {
+        "device_id": binding.device_id,
+        "family": binding.family,
+        "ext": binding.target.ext,
+        "serialnumber": binding.target.serialnumber,
+        "remote": dict(binding.remote),
+    }
+
+
+def _short_name(name: str) -> str:
+    prefix = PUBLISH_CLASS + "_"
+    if name.startswith(prefix):
+        return name[len(prefix):]
+    return name
+
+
+def _remote_values(info: dict) -> dict[str, Any]:
+    result = {}
+    for signal in (info.get("data") or {}).get("signals") or []:
+        name = str(signal.get("name") or signal.get("signal_name") or "")
+        value = (signal.get("state") or {}).get("value", signal.get("value"))
+        if name and value not in (None, ""):
+            result[_short_name(name)] = value
+    return result
+
+
+def _task_key(info: dict, name: str) -> str:
+    for signal in (info.get("data") or {}).get("signals") or []:
+        if (signal.get("name") or signal.get("signal_name")) == name:
+            return str(signal.get("signal_task_dt") or signal.get("task_dt") or "")
+    return ""
+
+
+def _number(value: Any) -> Any:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return value
+    if number.is_integer():
+        return int(number)
+    return number
 
 
 @lru_cache

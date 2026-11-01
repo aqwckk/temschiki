@@ -122,7 +122,13 @@ class ScenarioEngine:
                     continue
                 active = evaluator.is_active(situation, condition.value, manual, states, now)
                 if self._should_fire(scenario.id, condition, active, now):
-                    self._schedule(scenario, _cause(situation, condition), check_conditions=True, situation=situation)
+                    self._schedule(
+                        scenario,
+                        _cause(situation, condition),
+                        check_conditions=True,
+                        situation=situation,
+                        condition=condition,
+                    )
 
     def _should_fire(self, scenario_id: int, condition: SituationCondition, active: bool, now: datetime) -> bool:
         key = (scenario_id, condition.id)
@@ -155,11 +161,12 @@ class ScenarioEngine:
         cause: str,
         check_conditions: bool,
         situation: Optional[Situation] = None,
+        condition: Optional[SituationCondition] = None,
     ) -> None:
         if self._loop is None or self._loop.is_closed():
             logger.warning("движок не запущен, сценарий %s пропущен", scenario.id)
             return
-        coroutine = self._execute(scenario, cause, check_conditions, situation)
+        coroutine = self._execute(scenario, cause, check_conditions, situation, condition)
         asyncio.run_coroutine_threadsafe(coroutine, self._loop)
 
     async def _execute(
@@ -168,13 +175,14 @@ class ScenarioEngine:
         cause: str,
         check_conditions: bool,
         situation: Optional[Situation],
+        condition: Optional[SituationCondition],
     ) -> None:
         # один и тот же сценарий не запускается повторно, пока идет
         if scenario.id in self._running:
             return
         self._running.add(scenario.id)
         try:
-            await self._run_blocks(scenario, cause, check_conditions, situation)
+            await self._run_blocks(scenario, cause, check_conditions, situation, condition)
         except Exception:
             logger.exception("сценарий %s упал", scenario.id)
         finally:
@@ -186,6 +194,7 @@ class ScenarioEngine:
         cause: str,
         check_conditions: bool,
         situation: Optional[Situation],
+        condition: Optional[SituationCondition] = None,
     ) -> None:
         started_at = datetime.now(timezone.utc)
         if check_conditions:
@@ -194,13 +203,20 @@ class ScenarioEngine:
                 journal.save_run(scenario.id, cause, "skipped", failed, [], started_at)
                 return
 
+        blocks = scenario.of_kind(*ACTION_KINDS)
+        device_on = None
+        if condition is not None:
+            blocks, device_on = _reaction_plan(blocks, condition)
+
         steps = []
-        for block in scenario.of_kind(*ACTION_KINDS):
-            error = await self._do_action(scenario, block)
-            steps.append({"block_id": block.id, "kind": block.kind, "ok": error == "", "error": error})
+        for group in _parallel_groups(blocks):
+            # шаг сценария: блоки одного столбца выполняются одновременно
+            results = await asyncio.gather(*(self._do_action(scenario, block, device_on) for block in group))
+            for block, error in zip(group, results):
+                steps.append({"block_id": block.id, "kind": block.kind, "ok": error == "", "error": error})
 
         if situation is not None:
-            _notify_about(scenario, situation)
+            _notify_about(scenario, situation, condition)
 
         errors = [step["error"] for step in steps if step["error"]]
         if errors:
@@ -217,9 +233,12 @@ class ScenarioEngine:
                 return f"условие не выполнено: {block.signal} = {current}"
         return None
 
-    async def _do_action(self, scenario: LoadedScenario, block) -> str:
+    async def _do_action(self, scenario: LoadedScenario, block, device_on: Optional[bool] = None) -> str:
         if block.kind == "device":
-            return await self._with_retry(scenario, lambda: controls.turn(block.device_id, block.on))
+            on = block.on
+            if device_on is not None:
+                on = device_on
+            return await self._with_retry(scenario, lambda: controls.turn(block.device_id, on))
         if block.kind == "command":
             return await self._with_retry(
                 scenario, lambda: self.emulators.command(block.device_id, block.signal, block.value)
@@ -258,11 +277,35 @@ def _cause(situation: Situation, condition: SituationCondition) -> str:
     return text
 
 
-def _notify_about(scenario: LoadedScenario, situation: Situation) -> None:
+def _reaction_plan(blocks: list, condition: SituationCondition) -> tuple[list, Optional[bool]]:
+    """Что делать с устройствами по реакции условия: включить, выключить или не трогать."""
+    if condition.action == "on":
+        return blocks, True
+    if condition.action == "off":
+        return blocks, False
+    return [block for block in blocks if block.kind != "device"], None
+
+
+def _parallel_groups(blocks: list) -> list[list]:
+    groups = []
+    for block in blocks:
+        col = getattr(block, "col", None)
+        if col is not None and groups and getattr(groups[-1][0], "col", None) == col:
+            groups[-1].append(block)
+        else:
+            groups.append([block])
+    return groups
+
+
+def _notify_about(scenario: LoadedScenario, situation: Situation, condition: Optional[SituationCondition]) -> None:
     message = f"{situation.label}: сработал сценарий «{scenario.title}»"
+    if condition is not None and condition.action == "custom" and condition.action_text:
+        message = f"{situation.label}: {condition.action_text}"
     journal.add_notification("resident", message, scenario.id)
-    # об авариях узнает и консьерж
-    if situation.alarm:
+    # об авариях и обращениях в поддержку узнает консьерж
+    if condition is not None and condition.action == "support":
+        journal.add_notification("concierge", f"Обращение в техподдержку. {message}", scenario.id)
+    elif situation.alarm:
         journal.add_notification("concierge", message, scenario.id)
 
 

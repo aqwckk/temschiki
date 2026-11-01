@@ -1,4 +1,4 @@
-import { Fragment, useRef, useState } from 'react'
+import { Fragment, useEffect, useRef, useState } from 'react'
 import {
     DndContext,
     DragOverlay,
@@ -18,10 +18,35 @@ import {
     verticalListSortingStrategy,
 } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
-import { initialDevices, initialScenarios } from './mock'
+import * as api from './api'
+import { useLive } from './useLive'
 
+// id блоков и условий хранятся на сервере, поэтому счетчик дополняем временем запуска страницы
+const sessionMark = Date.now().toString(36)
 let counter = 100
-const uid = (p) => `${p}${counter++}`
+const uid = (p) => `${p}${sessionMark}${counter++}`
+
+// сохранение сценария откладываем, чтобы не слать запрос на каждую букву названия
+const SAVE_DELAY = 400
+// показания устройств обновляем не чаще раза в полсекунды
+const DEVICES_REFRESH_DELAY = 500
+
+// фоновые ошибки (обновление показаний) только в консоль
+const report = (error) => console.error(error)
+
+// ошибки действий пользователя показываем, иначе кнопка молча "не работает"
+const reportAction = (error) => {
+    console.error(error)
+    window.alert('Не получилось: сервер недоступен или отклонил запрос. Подробности в консоли.')
+}
+
+const replaceById = (list, item) =>
+    list.map((x) => {
+        if (x.id === item.id) {
+            return item
+        }
+        return x
+    })
 const split = (id) => String(id).split(':')
 const scenarioOfBlock = (list, blockId) =>
     list.find((s) => s.blocks.some((b) => b.id === blockId))
@@ -52,20 +77,6 @@ const collide = (args) => {
     return hits.length ? hits : closestCenter(args)
 }
 
-const situations = [
-    { type: 'water', label: 'Отключили воду' },
-    { type: 'power', label: 'Нет электричества' },
-    { type: 'gas', label: 'Отключили газ' },
-    { type: 'internet', label: 'Нет интернета' },
-    { type: 'heating', label: 'Отключили отопление' },
-    { type: 'door', label: 'Открыта дверь' },
-    { type: 'away', label: 'Никого нет дома' },
-    { type: 'leak', label: 'Протечка', noTime: true },
-    { type: 'smoke', label: 'Дым в помещении', noTime: true },
-    { type: 'night', label: 'Наступила ночь', noTime: true },
-    { type: 'cold', label: 'Температура ниже', unit: '°C', value: 18 },
-    { type: 'hot', label: 'Температура выше', unit: '°C', value: 28 },
-]
 const situationOf = (type, list) => list.find((s) => s.type === type)
 
 const paramTypes = [
@@ -1268,10 +1279,12 @@ const tabsList = [
 
 export default function App() {
     const [tab, setTab] = useState('home')
-    const [devices, setDevices] = useState(() => initialDevices.map(upgradeDevice))
-    const [scenarios, setScenarios] = useState(initialScenarios)
-    const [customSituations, setCustomSituations] = useState([])
+    const [devices, setDevices] = useState([])
+    const [scenarios, setScenarios] = useState([])
+    const [situations, setSituations] = useState([])
     const [emergencies, setEmergencies] = useState([])
+    const [loaded, setLoaded] = useState(false)
+    const [loadError, setLoadError] = useState('')
     const [tickets, setTickets] = useState([])
     const [activeId, setActiveId] = useState(null)
     const [dockOpen, setDockOpen] = useState(false)
@@ -1281,82 +1294,218 @@ export default function App() {
     const [addDevOpen, setAddDevOpen] = useState(false)
     const [editDevId, setEditDevId] = useState(null)
 
-    const sits = [...situations, ...customSituations]
+    // актуальные сценарии нужны синхронно, до перерисовки
+    const scenariosRef = useRef([])
+    const saveTimers = useRef({})
+    const devicesTimer = useRef(null)
+
+    const sits = situations
 
     const sensors = useSensors(
         useSensor(MouseSensor, { activationConstraint: { distance: 6 } }),
         useSensor(TouchSensor, { activationConstraint: { delay: 180, tolerance: 8 } }),
     )
 
+    useEffect(() => {
+        api.getDeviceTypes()
+            .then(() =>
+                Promise.all([api.getDevices(), api.getScenarios(), api.getSituations(), api.getEmergencies()]),
+            )
+            .then(([loadedDevices, loadedScenarios, loadedSituations, loadedEmergencies]) => {
+                setDevices(loadedDevices)
+                putScenarios(loadedScenarios)
+                setSituations(loadedSituations)
+                setEmergencies(loadedEmergencies)
+                setLoaded(true)
+            })
+            .catch((error) => {
+                report(error)
+                setLoadError('Не удалось связаться с сервером')
+            })
+    }, [])
+
+    const refreshDevicesSoon = () => {
+        if (devicesTimer.current) return
+        devicesTimer.current = setTimeout(() => {
+            devicesTimer.current = null
+            api.getDevices().then(setDevices).catch(report)
+        }, DEVICES_REFRESH_DELAY)
+    }
+
+    useLive((event) => {
+        if (event.type === 'signal' || event.type === 'device_status') {
+            refreshDevicesSoon()
+        }
+        if (event.type === 'emergency_started') {
+            addEmergency(api.fromEmergency(event.emergency))
+        }
+        if (event.type === 'emergency_ended') {
+            const id = String(event.id)
+            setEmergencies((es) => es.filter((e) => e.id !== id))
+        }
+    })
+
+    const putScenarios = (next) => {
+        scenariosRef.current = next
+        setScenarios(next)
+    }
+
+    const saveLater = (id) => {
+        clearTimeout(saveTimers.current[id])
+        saveTimers.current[id] = setTimeout(() => {
+            delete saveTimers.current[id]
+            const scenario = scenariosRef.current.find((s) => s.id === id)
+            // пустое название фронт заменит при потере фокуса, его не сохраняем
+            if (scenario && scenario.title.trim()) {
+                api.saveScenario(scenario).catch(reportAction)
+            }
+        }, SAVE_DELAY)
+    }
+
+    // меняет сценарии на экране сразу и сохраняет на сервере то, что изменилось
+    const updateScenarios = (change) => {
+        const prev = scenariosRef.current
+        const next = change(prev)
+        if (next === prev) return
+        putScenarios(next)
+        for (const s of next) {
+            const before = prev.find((p) => p.id === s.id)
+            if (before && before !== s) {
+                saveLater(s.id)
+            }
+        }
+        const prevOrder = prev.map((s) => s.id).join(',')
+        const nextOrder = next.map((s) => s.id).join(',')
+        if (prev.length === next.length && prevOrder !== nextOrder) {
+            api.reorderScenarios(next.map((s) => s.id)).catch(reportAction)
+        }
+    }
+
     const toggleDevice = (id) =>
-        setDevices((ds) => ds.map((d) => (d.id === id ? { ...d, on: !d.on } : d)))
+        api
+            .toggleDevice(id)
+            .then((updated) => setDevices((ds) => replaceById(ds, updated)))
+            .catch(reportAction)
 
     const addDevice = (data) => {
-        setDevices((ds) => [...ds, { id: uid('d'), on: false, ...data }])
-        setAddDevOpen(false)
+        // из списка: тип устройства совпадает с ключом каталога
+        const item = deviceCatalog.find((d) => d.name === data.name)
+        let request
+        if (data.ujin && item) {
+            request = api.createDevice(data.name, item.key)
+        } else {
+            request = api.createCustomDevice(data.name, data.params)
+        }
+        request
+            .then((created) => {
+                setDevices((ds) => [...ds, created])
+                setAddDevOpen(false)
+            })
+            .catch(reportAction)
     }
 
     const saveDeviceParams = (id, params) => {
-        setDevices((ds) => ds.map((d) => (d.id === id ? { ...d, params } : d)))
-        setEditDevId(null)
+        const device = devices.find((d) => d.id === id)
+        const before = Object.fromEntries((device?.params ?? []).map((p) => [p.id, p.value]))
+        // на эмулятор уходят только изменившиеся числовые параметры, которыми можно управлять
+        const changed = params.filter(
+            (p) => canWrite(p) && before[p.id] !== p.value && Number.isFinite(Number(p.value)),
+        )
+        Promise.all(changed.map((p) => api.sendCommand(id, p.id, Number(p.value))))
+            .then(() => api.getDevice(id))
+            .then((updated) => {
+                setDevices((ds) => replaceById(ds, updated))
+                setEditDevId(null)
+            })
+            .catch(reportAction)
     }
 
-    const removeDevice = (id) => {
-        setDevices((ds) => ds.filter((d) => d.id !== id))
-        setScenarios((ss) =>
-            ss.map((s) => ({ ...s, blocks: normalizeBlocks(s.blocks.filter((b) => b.deviceId !== id)) })),
-        )
-    }
+    const removeDevice = (id) =>
+        api
+            .deleteDevice(id)
+            .then(() => {
+                setDevices((ds) => ds.filter((d) => d.id !== id))
+                // сервер уже убрал устройство из сценариев, повторяем это на экране
+                putScenarios(
+                    scenariosRef.current.map((s) => ({
+                        ...s,
+                        blocks: normalizeBlocks(s.blocks.filter((b) => b.deviceId !== id)),
+                    })),
+                )
+            })
+            .catch(reportAction)
 
     const addScenario = () =>
-        setScenarios((ss) => [
-            ...ss,
-            { id: uid('s'), title: `Сценарий ${ss.length + 1}`, blocks: [], conditions: [] },
-        ])
+        api
+            .createScenario(`Сценарий ${scenariosRef.current.length + 1}`)
+            .then((created) => putScenarios([...scenariosRef.current, created]))
+            .catch(reportAction)
 
     const renameScenario = (id, title) =>
-        setScenarios((ss) => ss.map((s) => (s.id === id ? { ...s, title } : s)))
+        updateScenarios((ss) =>
+            ss.map((s) => {
+                if (s.id !== id) return s
+                return { ...s, title }
+            }),
+        )
 
-    const removeScenario = (id) => setScenarios((ss) => ss.filter((s) => s.id !== id))
+    const removeScenario = (id) => {
+        clearTimeout(saveTimers.current[id])
+        api.deleteScenario(id)
+            .then(() => putScenarios(scenariosRef.current.filter((s) => s.id !== id)))
+            .catch(reportAction)
+    }
 
     const removeBlock = (blockId) =>
-        setScenarios((ss) =>
-            ss.map((s) => ({ ...s, blocks: normalizeBlocks(s.blocks.filter((b) => b.id !== blockId)) })),
+        updateScenarios((ss) =>
+            ss.map((s) => {
+                if (!s.blocks.some((b) => b.id === blockId)) return s
+                return { ...s, blocks: normalizeBlocks(s.blocks.filter((b) => b.id !== blockId)) }
+            }),
         )
 
-    const addCustomSituation = (label) => {
-        const clean = label.trim()
-        const found = sits.find((s) => s.label.toLowerCase() === clean.toLowerCase())
-        if (found) return found
-        const s = { type: uid('custom_'), label: clean }
-        setCustomSituations((cs) => [...cs, s])
-        return s
+    const addCustomSituation = async (label) => {
+        const created = await api.createSituation(label.trim())
+        setSituations((list) => {
+            if (list.some((s) => s.type === created.type)) return list
+            return [...list, created]
+        })
+        return created
     }
 
-    const startEmergency = ({ type, name, amount, unit }) => {
-        const sit = type === '__custom' ? addCustomSituation(name) : situationOf(type, sits)
-        if (!sit) return
-        setEmergencies((es) => [
-            ...es,
-            { id: uid('e'), type: sit.type, label: sit.label, amount, unit },
-        ])
+    const addEmergency = (emergency) =>
+        setEmergencies((es) => {
+            if (es.some((e) => e.id === emergency.id)) return es
+            return [...es, emergency]
+        })
 
-        const auto = scenarios.filter((s) =>
-            (s.conditions ?? []).some((c) => c.type === sit.type && c.action === 'support'),
-        )
-        if (auto.length > 0)
-            setTickets((ts) => [
-                ...auto.map((s) => ({
-                    id: uid('t'),
-                    subject: sit.label,
-                    text: `Сценарий «${s.title}»`,
-                    deviceId: null,
-                    done: false,
-                    auto: true,
-                })),
-                ...ts,
-            ])
-    }
+    const startEmergency = ({ type, name, amount, unit }) =>
+        api
+            .startEmergency({ type, name, amount, unit })
+            .then((created) => {
+                addEmergency(created)
+                // своя ситуация создается на сервере, подтягиваем ее в списки
+                if (type === '__custom') {
+                    api.getSituations().then(setSituations).catch(report)
+                }
+                // обращения в поддержку пока живут только на фронте
+                const auto = scenariosRef.current.filter((s) =>
+                    (s.conditions ?? []).some((c) => c.type === created.type && c.action === 'support'),
+                )
+                if (auto.length > 0)
+                    setTickets((ts) => [
+                        ...auto.map((s) => ({
+                            id: uid('t'),
+                            subject: created.label,
+                            text: `Сценарий «${s.title}»`,
+                            deviceId: null,
+                            done: false,
+                            auto: true,
+                        })),
+                        ...ts,
+                    ])
+            })
+            .catch(reportAction)
 
     const addTicket = (data) =>
         setTickets((ts) => [{ id: uid('t'), done: false, auto: false, ...data }, ...ts])
@@ -1364,17 +1513,29 @@ export default function App() {
     const closeTicket = (id) =>
         setTickets((ts) => ts.map((t) => (t.id === id ? { ...t, done: true } : t)))
 
-    const endEmergency = (id) => setEmergencies((es) => es.filter((e) => e.id !== id))
+    const endEmergency = (id) =>
+        api
+            .endEmergency(id)
+            .then(() => setEmergencies((es) => es.filter((e) => e.id !== id)))
+            .catch(reportAction)
 
     const openAddCond = (scenarioId) => setSheet({ mode: 'add', scenarioId })
     const openEditCond = (scenarioId, condId) => setSheet({ mode: 'edit', scenarioId, condId })
 
-    const saveCond = ({ newLabel, ...data }) => {
+    const saveCond = async ({ newLabel, ...data }) => {
         const { mode, scenarioId, condId } = sheet
-        const finalType = newLabel ? addCustomSituation(newLabel).type : data.type
+        let finalType = data.type
+        if (newLabel) {
+            try {
+                finalType = (await addCustomSituation(newLabel)).type
+            } catch (error) {
+                reportAction(error)
+                return
+            }
+        }
         const payload = { ...data, type: finalType }
         const newId = uid('c')
-        setScenarios((ss) =>
+        updateScenarios((ss) =>
             ss.map((s) => {
                 if (s.id !== scenarioId) return s
                 const list = s.conditions ?? []
@@ -1386,7 +1547,7 @@ export default function App() {
     }
 
     const removeCond = (scenarioId, condId) =>
-        setScenarios((ss) =>
+        updateScenarios((ss) =>
             ss.map((s) =>
                 s.id === scenarioId
                     ? { ...s, conditions: (s.conditions ?? []).filter((c) => c.id !== condId) }
@@ -1399,11 +1560,13 @@ export default function App() {
         setSheet(null)
     }
 
-    const saveNewSituation = (label) => {
+    const saveNewSituation = (label) =>
         addCustomSituation(label)
-        setNewSitOpen(false)
-        setDockKind('situations')
-    }
+            .then(() => {
+                setNewSitOpen(false)
+                setDockKind('situations')
+            })
+            .catch(reportAction)
 
     const handleDragEnd = ({ active, over }) => {
         setActiveId(null)
@@ -1427,7 +1590,7 @@ export default function App() {
                 action: 'off',
                 actionText: '',
             }
-            setScenarios((prev) =>
+            updateScenarios((prev) =>
                 prev.map((s) =>
                     s.id === target.id ? { ...s, conditions: [...(s.conditions ?? []), nc] } : s,
                 ),
@@ -1436,7 +1599,7 @@ export default function App() {
             return
         }
 
-        setScenarios((prev) => {
+        updateScenarios((prev) => {
             const target = prev.find((s) => s.id === scenarioIdOf(prev))
             if (!target) return prev
 
@@ -1532,6 +1695,16 @@ export default function App() {
         scenarios: ['Сценарии', `Всего сценариев: ${scenarios.length}`],
     }
     const [title, subtitle] = titles[tab]
+
+    if (!loaded) {
+        return (
+            <div className="phone">
+                <main className="content">
+                    <p className="empty">{loadError || 'Загрузка...'}</p>
+                </main>
+            </div>
+        )
+    }
 
     return (
         <DndContext

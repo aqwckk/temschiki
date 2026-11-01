@@ -18,7 +18,7 @@ class SignalDeclaration(BaseModel):
     min: Optional[float] = None
     max: Optional[float] = None
     layout: Optional[dict[str, str]] = None
-    default: Optional[Union[int, float]] = None
+    default: Optional[Union[int, float, str]] = None
     affects: Optional[str] = None
 
 
@@ -66,6 +66,8 @@ class DeviceRead(BaseModel):
     online: bool = False
     on: bool = False
     params: list[str] = []
+    # текущие значения сигналов, фронт строит из них редактируемые параметры
+    values: dict[str, Any] = {}
 
 
 class ToggleIn(BaseModel):
@@ -184,14 +186,20 @@ class UjinBinding(BaseModel):
     family: str
     ext: str
     serialnumber: str
+    # что стенд отдает по устройству через get-device-info
+    remote: dict[str, Any] = {}
 
 
 class UjinStatus(BaseModel):
     mode: Literal["dry", "live"]
     enabled: bool
+    auth: str = ""
     bindings: list[UjinBinding]
     published: int
     last_flush_at: Optional[datetime]
+    last_readback_at: Optional[datetime] = None
+    commands_applied: int = 0
+    last_command: str = ""
     last_error: str
 
 

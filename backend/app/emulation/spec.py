@@ -21,7 +21,8 @@ class SignalSpec(BaseModel):
     measure: str = Field(default="", max_length=20)
     min: Optional[float] = None
     max: Optional[float] = None
-    default: Union[int, float] = 0
+    # строка - для текстовых параметров и цвета из конструктора фронта
+    default: Union[int, float, str] = 0
     layout: Optional[dict[str, str]] = None
     affects: Optional[str] = None
 
@@ -50,12 +51,14 @@ class SignalSpec(BaseModel):
             raise ValueError(f"имя сигнала {self.name} зарезервировано")
         if self.min is not None and self.max is not None and self.min > self.max:
             raise ValueError(f"{self.name}: min больше max")
+        if self.affects is not None and not self.writable:
+            raise ValueError(f"{self.name}: affects есть только у команд и настроек")
+        if isinstance(self.default, str):
+            return self
         if self.min is not None and self.default < self.min:
             raise ValueError(f"{self.name}: значение по умолчанию меньше min")
         if self.max is not None and self.default > self.max:
             raise ValueError(f"{self.name}: значение по умолчанию больше max")
-        if self.affects is not None and not self.writable:
-            raise ValueError(f"{self.name}: affects есть только у команд и настроек")
         return self
 
 

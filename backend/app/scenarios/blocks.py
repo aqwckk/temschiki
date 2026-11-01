@@ -76,6 +76,8 @@ class DeviceBlock(BaseModel):
     kind: Literal["device"] = "device"
     device_id: int = Field(alias="deviceId")
     on: bool = True
+    # блоки с одинаковым col выполняются одновременно
+    col: Optional[int] = None
 
 
 def _block_kind(data: Any) -> str:
@@ -100,13 +102,24 @@ Block = Annotated[
 ACTION_KINDS = ("device", "command", "notify", "delay")
 
 
+Reaction = Literal["off", "on", "notify", "support", "none", "custom"]
+
+
 class SituationCondition(BaseModel):
-    """Ситуация, влияющая на сценарий. Время - необязательное "во сколько"."""
+    """Ситуация, влияющая на сценарий. Время - необязательное "во сколько".
+
+    action - что сделать, когда ситуация началась: выключить или включить устройства
+    сценария, прислать уведомление, обратиться в техподдержку, ничего или свое действие.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
 
     id: str = Field(default_factory=new_block_id)
     type: str = Field(min_length=1)
     time: Optional[str] = Field(default=None, pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
     value: Optional[float] = None
+    action: Reaction = "off"
+    action_text: str = Field(default="", alias="actionText", max_length=200)
 
     @field_validator("time", "value", mode="before")
     @classmethod

@@ -2,6 +2,9 @@
 // id приходят числами, а фронт сравнивает их со строками из dnd ("device:5"),
 // поэтому на входе приводим id к строкам, а на выходе обратно к числам.
 
+// типы устройств нужны, чтобы превратить сигналы устройства в параметры карточки
+let deviceTypes = []
+
 async function request(method, path, body) {
     const options = { method, headers: {} }
     if (body !== undefined) {
@@ -19,8 +22,51 @@ async function request(method, path, body) {
     return response.json()
 }
 
+// control сигнала бэкенда -> тип параметра фронта, остальное считаем числом
+const PARAM_TYPES = { switch: 'switch', list: 'list', text: 'text' }
+
+function paramType(signal) {
+    if (signal.control === 'text' && typeof signal.default === 'string' && signal.default.startsWith('#')) {
+        return 'color'
+    }
+    return PARAM_TYPES[signal.control] ?? 'counter'
+}
+
+function paramAccess(signal) {
+    if (signal.management === 'r') {
+        return 'r'
+    }
+    return 'rw'
+}
+
+function toParam(signal, values) {
+    let value = values[signal.name]
+    if (value === undefined) {
+        value = signal.default ?? 0
+    }
+    return {
+        id: signal.name,
+        label: signal.title,
+        type: paramType(signal),
+        access: paramAccess(signal),
+        value,
+        unit: signal.measure || undefined,
+        min: signal.min ?? undefined,
+        max: signal.max ?? undefined,
+        layout: signal.layout ?? undefined,
+    }
+}
+
 function fromDevice(device) {
-    return { ...device, id: String(device.id) }
+    const type = deviceTypes.find((t) => t.family === device.family)
+    let params = []
+    let ujin = false
+    if (type) {
+        // прошивку и прочую служебную обвязку жителю не показываем
+        params = type.signals.filter((s) => s.kind !== 'system').map((s) => toParam(s, device.values ?? {}))
+        ujin = type.builtin
+    }
+    return { ...device, id: String(device.id), params, ujin }
 }
 
 function fromBlock(block) {
@@ -38,7 +84,13 @@ function toBlock(block) {
     if (block.kind && block.kind !== 'device') {
         return block
     }
-    return { id: block.id, kind: 'device', deviceId: Number(block.deviceId), on: block.on ?? true }
+    return {
+        id: block.id,
+        kind: 'device',
+        deviceId: Number(block.deviceId),
+        on: block.on ?? true,
+        col: block.col ?? null,
+    }
 }
 
 function toScenario(scenario) {
@@ -50,8 +102,34 @@ function toScenario(scenario) {
     }
 }
 
+// параметр из конструктора фронта -> сигнал декларации бэкенда
+const SIGNAL_CONTROLS = { switch: 'switch', counter: 'counter', list: 'list', text: 'text', color: 'text' }
+
+function toSignal(param, index) {
+    let kind = 'capability'
+    if (param.type === 'text' || param.type === 'color') {
+        kind = 'property'
+    }
+    return {
+        name: `p${index + 1}`,
+        title: param.label,
+        kind,
+        control: SIGNAL_CONTROLS[param.type] ?? 'text',
+        measure: param.unit ?? '',
+        min: param.min ?? null,
+        max: param.max ?? null,
+        default: param.value ?? 0,
+        layout: param.layout ?? null,
+    }
+}
+
 export function fromEmergency(emergency) {
     return { ...emergency, id: String(emergency.id) }
+}
+
+export async function getDeviceTypes() {
+    deviceTypes = await request('GET', '/device-types')
+    return deviceTypes
 }
 
 export async function getDevices() {
@@ -59,16 +137,32 @@ export async function getDevices() {
     return devices.map(fromDevice)
 }
 
-export function getDeviceTypes() {
-    return request('GET', '/device-types')
+export async function getDevice(id) {
+    return fromDevice(await request('GET', `/devices/${id}`))
 }
 
 export async function createDevice(name, family) {
     return fromDevice(await request('POST', '/devices', { name, family }))
 }
 
+// свое устройство: сначала тип в конструкторе, потом устройство этого типа
+export async function createCustomDevice(name, params) {
+    const family = `c${Date.now().toString(36)}`
+    const type = await request('POST', '/device-types', {
+        family,
+        title: name,
+        signals: params.map(toSignal),
+    })
+    deviceTypes = [...deviceTypes, type]
+    return createDevice(name, family)
+}
+
 export async function toggleDevice(id) {
     return fromDevice(await request('POST', `/devices/${id}/toggle`, {}))
+}
+
+export function sendCommand(id, signal, value) {
+    return request('POST', `/devices/${id}/command`, { signal, value })
 }
 
 export function deleteDevice(id) {
@@ -115,4 +209,8 @@ export async function startEmergency({ type, name, amount, unit }) {
 
 export function endEmergency(id) {
     return request('DELETE', `/emergencies/${id}`)
+}
+
+export async function getNotifications() {
+    return request('GET', '/notifications')
 }

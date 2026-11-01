@@ -32,7 +32,9 @@ def to_read(device: Device) -> DeviceRead:
     data.online = runtime.is_online(device.id)
     if runtime.is_running(device.id):
         data.on = controls.is_on(device.id)
-        data.params = presentation.params(device.family, runtime.values(device.id))
+        values = runtime.values(device.id)
+        data.params = presentation.params(device.family, values)
+        data.values = values
     return data
 
 

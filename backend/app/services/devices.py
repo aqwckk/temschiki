@@ -8,6 +8,7 @@ from app.scenarios.engine import engine
 from app.models import Device
 from app.realtime import events
 from app.schemas import DeviceCreate, DeviceUpdate
+from app.services import scenarios as scenario_service
 from app.ujin.mirror import mirror
 
 
@@ -38,8 +39,10 @@ def delete_device(session: Session, device: Device) -> None:
     runtime.remove(device.id)
     mirror.unbind(device.id)
     engine.forget_device(device.id)
+    device_id = device.id
     session.delete(device)
     session.commit()
+    scenario_service.remove_device(session, device_id)
 
 
 def set_power(device: Device, online: bool) -> None:

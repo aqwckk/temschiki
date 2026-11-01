@@ -23,6 +23,10 @@ def unregister_custom(family: str) -> None:
     _custom.pop(family, None)
 
 
+def custom_spec(family: str) -> Optional[DeviceTypeSpec]:
+    return _custom.get(family)
+
+
 def is_builtin(family: str) -> bool:
     return family in REGISTRY
 

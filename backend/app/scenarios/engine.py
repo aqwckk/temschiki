@@ -1,4 +1,4 @@
-"""Исполнение сценариев: событие, проверка условий, действия по порядку."""
+"""Исполнение сценариев: событие или ситуация, проверка условий, действия по порядку."""
 import asyncio
 import logging
 import threading
@@ -8,17 +8,22 @@ from typing import Any, Optional
 
 from pydantic import TypeAdapter
 
+from app.emulation import controls
 from app.emulation.errors import CommandRejected, DeviceNotRunning, DeviceOffline
 from app.emulation.runtime import EmulatorRuntime, runtime
-from app.scenarios.blocks import ACTION_KINDS, Block, compare
-from app.services import journal
+from app.scenarios.blocks import ACTION_KINDS, Block, SituationCondition, compare
+from app.services import emergencies, journal
+from app.situations import catalog, evaluator
+from app.situations.catalog import Situation
 
 logger = logging.getLogger(__name__)
 
 blocks_adapter = TypeAdapter(list[Block])
+conditions_adapter = TypeAdapter(list[SituationCondition])
 
 COMMAND_ATTEMPTS = 2
 RETRY_DELAY = 1.0
+WATCH_INTERVAL = 1.0
 
 
 @dataclass
@@ -26,14 +31,19 @@ class LoadedScenario:
     id: int
     title: str
     blocks: list
+    conditions: list
 
     def of_kind(self, *kinds: str) -> list:
         return [block for block in self.blocks if block.kind in kinds]
 
 
 def load(scenario) -> LoadedScenario:
-    blocks = blocks_adapter.validate_python(scenario.blocks)
-    return LoadedScenario(id=scenario.id, title=scenario.title, blocks=blocks)
+    return LoadedScenario(
+        id=scenario.id,
+        title=scenario.title,
+        blocks=blocks_adapter.validate_python(scenario.blocks),
+        conditions=conditions_adapter.validate_python(scenario.conditions or []),
+    )
 
 
 class ScenarioEngine:
@@ -41,8 +51,12 @@ class ScenarioEngine:
         self.emulators = emulators
         self._scenarios: list[LoadedScenario] = []
         self._last_values: dict[tuple[int, str], Any] = {}
+        # состояние ситуаций по условиям сценариев, чтобы ловить момент начала
+        self._situation_state: dict[tuple[int, str], bool] = {}
+        self._fired_at: dict[tuple[int, str], str] = {}
         self._running: set[int] = set()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._watch_task: Optional[asyncio.Task] = None
         self._lock = threading.Lock()
         self._subscribed = False
 
@@ -50,10 +64,23 @@ class ScenarioEngine:
         self._loop = loop
         with self._lock:
             self._last_values.clear()
+            self._situation_state.clear()
+            self._fired_at.clear()
         self.reload(scenarios)
         if not self._subscribed:
             self.emulators.subscribe(self.on_signal)
             self._subscribed = True
+        self._watch_task = loop.create_task(self._watch())
+
+    async def stop(self) -> None:
+        if self._watch_task is None:
+            return
+        self._watch_task.cancel()
+        try:
+            await self._watch_task
+        except asyncio.CancelledError:
+            pass
+        self._watch_task = None
 
     def reload(self, scenarios: list) -> None:
         loaded = [load(scenario) for scenario in scenarios if scenario.enabled]
@@ -80,26 +107,86 @@ class ScenarioEngine:
                 cause = f"устройство {device_id}: {name} {trigger.op} {trigger.value}"
                 self._schedule(scenario, cause, check_conditions=True)
 
-    def _schedule(self, scenario: LoadedScenario, cause: str, check_conditions: bool) -> None:
+    def check_situations(self, now: Optional[datetime] = None) -> None:
+        """Сравнивает ситуации с прошлой проверкой и запускает сценарии, где ситуация началась."""
+        if now is None:
+            now = datetime.now()
+        states = self.emulators.all_states()
+        manual = emergencies.board.active_types()
+        with self._lock:
+            scenarios = list(self._scenarios)
+        for scenario in scenarios:
+            for condition in scenario.conditions:
+                situation = catalog.find(condition.type)
+                if situation is None:
+                    continue
+                active = evaluator.is_active(situation, condition.value, manual, states, now)
+                if self._should_fire(scenario.id, condition, active, now):
+                    self._schedule(scenario, _cause(situation, condition), check_conditions=True, situation=situation)
+
+    def _should_fire(self, scenario_id: int, condition: SituationCondition, active: bool, now: datetime) -> bool:
+        key = (scenario_id, condition.id)
+        with self._lock:
+            was_active = self._situation_state.get(key, False)
+            self._situation_state[key] = active
+            if condition.time is None:
+                return active and not was_active
+            # со временем: срабатывает в указанную минуту, если ситуация идет, раз в сутки
+            if not active or now.strftime("%H:%M") != condition.time:
+                return False
+            stamp = now.strftime("%Y-%m-%d %H:%M")
+            if self._fired_at.get(key) == stamp:
+                return False
+            self._fired_at[key] = stamp
+            return True
+
+    async def _watch(self) -> None:
+        while True:
+            await asyncio.sleep(WATCH_INTERVAL)
+            try:
+                emergencies.expire_due()
+                self.check_situations()
+            except Exception:
+                logger.exception("ошибка при проверке ситуаций")
+
+    def _schedule(
+        self,
+        scenario: LoadedScenario,
+        cause: str,
+        check_conditions: bool,
+        situation: Optional[Situation] = None,
+    ) -> None:
         if self._loop is None or self._loop.is_closed():
             logger.warning("движок не запущен, сценарий %s пропущен", scenario.id)
             return
-        coroutine = self._execute(scenario, cause, check_conditions)
+        coroutine = self._execute(scenario, cause, check_conditions, situation)
         asyncio.run_coroutine_threadsafe(coroutine, self._loop)
 
-    async def _execute(self, scenario: LoadedScenario, cause: str, check_conditions: bool) -> None:
+    async def _execute(
+        self,
+        scenario: LoadedScenario,
+        cause: str,
+        check_conditions: bool,
+        situation: Optional[Situation],
+    ) -> None:
         # один и тот же сценарий не запускается повторно, пока идет
         if scenario.id in self._running:
             return
         self._running.add(scenario.id)
         try:
-            await self._run_blocks(scenario, cause, check_conditions)
+            await self._run_blocks(scenario, cause, check_conditions, situation)
         except Exception:
             logger.exception("сценарий %s упал", scenario.id)
         finally:
             self._running.discard(scenario.id)
 
-    async def _run_blocks(self, scenario: LoadedScenario, cause: str, check_conditions: bool) -> None:
+    async def _run_blocks(
+        self,
+        scenario: LoadedScenario,
+        cause: str,
+        check_conditions: bool,
+        situation: Optional[Situation],
+    ) -> None:
         started_at = datetime.now(timezone.utc)
         if check_conditions:
             failed = self._failed_condition(scenario)
@@ -111,6 +198,9 @@ class ScenarioEngine:
         for block in scenario.of_kind(*ACTION_KINDS):
             error = await self._do_action(scenario, block)
             steps.append({"block_id": block.id, "kind": block.kind, "ok": error == "", "error": error})
+
+        if situation is not None:
+            _notify_about(scenario, situation)
 
         errors = [step["error"] for step in steps if step["error"]]
         if errors:
@@ -128,8 +218,12 @@ class ScenarioEngine:
         return None
 
     async def _do_action(self, scenario: LoadedScenario, block) -> str:
+        if block.kind == "device":
+            return await self._with_retry(scenario, lambda: controls.turn(block.device_id, block.on))
         if block.kind == "command":
-            return await self._send_command(scenario, block)
+            return await self._with_retry(
+                scenario, lambda: self.emulators.command(block.device_id, block.signal, block.value)
+            )
         if block.kind == "notify":
             journal.add_notification(block.target, block.message, scenario.id)
             return ""
@@ -138,11 +232,11 @@ class ScenarioEngine:
             return ""
         return f"неизвестное действие {block.kind}"
 
-    async def _send_command(self, scenario: LoadedScenario, block) -> str:
+    async def _with_retry(self, scenario: LoadedScenario, action) -> str:
         error = ""
         for attempt in range(COMMAND_ATTEMPTS):
             try:
-                self.emulators.command(block.device_id, block.signal, block.value)
+                action()
                 return ""
             except DeviceOffline as exc:
                 # устройство может вернуться, пробуем еще раз
@@ -153,6 +247,23 @@ class ScenarioEngine:
                 break
         journal.add_notification("concierge", f"Сценарий «{scenario.title}»: {error}", scenario.id)
         return error
+
+
+def _cause(situation: Situation, condition: SituationCondition) -> str:
+    text = f"ситуация: {situation.label}"
+    if situation.unit and condition.value is not None:
+        text += f" {condition.value:g}{situation.unit}"
+    if condition.time:
+        text += f" в {condition.time}"
+    return text
+
+
+def _notify_about(scenario: LoadedScenario, situation: Situation) -> None:
+    message = f"{situation.label}: сработал сценарий «{scenario.title}»"
+    journal.add_notification("resident", message, scenario.id)
+    # об авариях узнает и консьерж
+    if situation.alarm:
+        journal.add_notification("concierge", message, scenario.id)
 
 
 def _fired_trigger(scenario: LoadedScenario, device_id: int, name: str, old: Any, new: Any):

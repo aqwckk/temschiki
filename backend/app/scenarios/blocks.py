@@ -1,9 +1,9 @@
 """Блоки сценария. Порядок блоков задает пользователь перетаскиванием."""
 import operator
-from typing import Annotated, Any, Literal, Union
+from typing import Annotated, Any, Literal, Optional, Union
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Discriminator, Field, Tag, field_validator
 
 Operator = Literal["==", "!=", ">", ">=", "<", "<="]
 
@@ -67,9 +67,51 @@ class DelayBlock(BaseModel):
     seconds: float = Field(gt=0, le=300)
 
 
+class DeviceBlock(BaseModel):
+    """Блок фронта: устройство из панели. Выполняется главной командой устройства."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: str = Field(default_factory=new_block_id)
+    kind: Literal["device"] = "device"
+    device_id: int = Field(alias="deviceId")
+    on: bool = True
+
+
+def _block_kind(data: Any) -> str:
+    # фронт присылает блок устройства без kind
+    if isinstance(data, dict):
+        return data.get("kind", "device")
+    return getattr(data, "kind", "device")
+
+
 Block = Annotated[
-    Union[TriggerBlock, ConditionBlock, CommandBlock, NotifyBlock, DelayBlock],
-    Field(discriminator="kind"),
+    Union[
+        Annotated[TriggerBlock, Tag("trigger")],
+        Annotated[ConditionBlock, Tag("condition")],
+        Annotated[CommandBlock, Tag("command")],
+        Annotated[NotifyBlock, Tag("notify")],
+        Annotated[DelayBlock, Tag("delay")],
+        Annotated[DeviceBlock, Tag("device")],
+    ],
+    Discriminator(_block_kind),
 ]
 
-ACTION_KINDS = ("command", "notify", "delay")
+ACTION_KINDS = ("device", "command", "notify", "delay")
+
+
+class SituationCondition(BaseModel):
+    """Ситуация, влияющая на сценарий. Время - необязательное "во сколько"."""
+
+    id: str = Field(default_factory=new_block_id)
+    type: str = Field(min_length=1)
+    time: Optional[str] = Field(default=None, pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
+    value: Optional[float] = None
+
+    @field_validator("time", "value", mode="before")
+    @classmethod
+    def empty_is_none(cls, value):
+        # фронт присылает пустую строку, если поле не заполнено
+        if value == "":
+            return None
+        return value

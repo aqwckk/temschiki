@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 from app.db import get_session
 from app.models import Scenario
 from app.scenarios.engine import engine
-from app.schemas import ScenarioIn, ScenarioRead, ScenarioRunRead
+from app.schemas import ScenarioIn, ScenarioOrder, ScenarioRead, ScenarioRunRead
 from app.services import journal
 from app.services import scenarios as service
 
@@ -21,6 +21,12 @@ def get_existing_scenario(scenario_id: int, session: Session = Depends(get_sessi
 @router.get("", response_model=list[ScenarioRead])
 def list_scenarios(session: Session = Depends(get_session)):
     return service.list_scenarios(session)
+
+
+@router.put("/order", response_model=list[ScenarioRead])
+def reorder_scenarios(data: ScenarioOrder, session: Session = Depends(get_session)):
+    # объявлен раньше /{scenario_id}, иначе "order" примут за id
+    return service.reorder(session, data.ids)
 
 
 @router.get("/{scenario_id}", response_model=ScenarioRead)

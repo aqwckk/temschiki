@@ -22,3 +22,11 @@ def publish_run(run: dict) -> None:
 
 def publish_notification(notification: dict) -> None:
     hub.publish({"type": "notification", "notification": notification})
+
+
+def publish_emergency(emergency: dict) -> None:
+    hub.publish({"type": "emergency_started", "emergency": emergency})
+
+
+def publish_emergency_ended(emergency_id: int) -> None:
+    hub.publish({"type": "emergency_ended", "id": emergency_id})

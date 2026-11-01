@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy.orm import Session
 
 from app.db import get_session
+from app.emulation import controls, presentation
 from app.emulation.runtime import runtime
 from app.models import Device
 from app.schemas import (
@@ -12,6 +13,7 @@ from app.schemas import (
     DeviceUpdate,
     PowerIn,
     SimulateIn,
+    ToggleIn,
 )
 from app.services import devices as service
 
@@ -28,6 +30,9 @@ def get_existing_device(device_id: int, session: Session = Depends(get_session))
 def to_read(device: Device) -> DeviceRead:
     data = DeviceRead.model_validate(device)
     data.online = runtime.is_online(device.id)
+    if runtime.is_running(device.id):
+        data.on = controls.is_on(device.id)
+        data.params = presentation.params(device.family, runtime.values(device.id))
     return data
 
 
@@ -87,6 +92,15 @@ def send_command(data: CommandIn, device: Device = Depends(get_existing_device))
 def simulate(data: SimulateIn, device: Device = Depends(get_existing_device)):
     runtime.simulate(device.id, data.input, data.value)
     return to_state(device)
+
+
+@router.post("/{device_id}/toggle", response_model=DeviceRead)
+def toggle(data: ToggleIn, device: Device = Depends(get_existing_device)):
+    target = data.on
+    if target is None:
+        target = not controls.is_on(device.id)
+    controls.turn(device.id, target)
+    return to_read(device)
 
 
 @router.put("/{device_id}/power", response_model=DeviceState)

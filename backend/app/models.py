@@ -11,6 +11,13 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def as_utc(moment: datetime) -> datetime:
+    # SQLite не хранит часовой пояс, все даты в базе считаем UTC
+    if moment.tzinfo is None:
+        return moment.replace(tzinfo=timezone.utc)
+    return moment
+
+
 class Device(Base):
     __tablename__ = "devices"
 
@@ -36,8 +43,30 @@ class Scenario(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     title: Mapped[str] = mapped_column(String(100))
     enabled: Mapped[bool] = mapped_column(default=True)
+    position: Mapped[int] = mapped_column(default=0)
     blocks: Mapped[list] = mapped_column(JSON, default=list)
+    conditions: Mapped[list] = mapped_column(JSON, default=list)
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+
+class CustomSituation(Base):
+    __tablename__ = "custom_situations"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    type: Mapped[str] = mapped_column(String(40), unique=True)
+    label: Mapped[str] = mapped_column(String(40))
+
+
+class Emergency(Base):
+    __tablename__ = "emergencies"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    type: Mapped[str] = mapped_column(String(40))
+    label: Mapped[str] = mapped_column(String(40))
+    amount: Mapped[int]
+    unit: Mapped[str] = mapped_column(String(1))
+    started_at: Mapped[datetime] = mapped_column(default=utcnow)
+    ends_at: Mapped[datetime]
 
 
 class ScenarioRun(Base):

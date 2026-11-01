@@ -56,10 +56,18 @@ class EmulatorRuntime:
             slot = self._get_slot(device_id)
             return _snapshot(slot)
 
+    def family(self, device_id: int) -> str:
+        return self._get_slot(device_id).family
+
     def all_states(self) -> list[dict]:
         with self._lock:
             return [
-                {"device_id": device_id, "online": slot.online, "values": _snapshot(slot)}
+                {
+                    "device_id": device_id,
+                    "family": slot.family,
+                    "online": slot.online,
+                    "values": _snapshot(slot),
+                }
                 for device_id, slot in self._slots.items()
             ]
 

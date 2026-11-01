@@ -1,29 +1,56 @@
-import { useRef, useState } from 'react'
+import { Fragment, useRef, useState } from 'react'
 import {
     DndContext,
     DragOverlay,
     MouseSensor,
     TouchSensor,
     closestCenter,
+    pointerWithin,
     useDraggable,
+    useDroppable,
     useSensor,
     useSensors,
 } from '@dnd-kit/core'
 import {
     SortableContext,
     arrayMove,
-    rectSortingStrategy,
     useSortable,
     verticalListSortingStrategy,
 } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
-import { deviceTemplates, initialDevices, initialScenarios } from './mock'
+import { initialDevices, initialScenarios } from './mock'
 
 let counter = 100
 const uid = (p) => `${p}${counter++}`
 const split = (id) => String(id).split(':')
 const scenarioOfBlock = (list, blockId) =>
     list.find((s) => s.blocks.some((b) => b.id === blockId))
+
+const columnsOf = (blocks) => {
+    const map = new Map()
+    blocks.forEach((b, i) => {
+        const c = b.col ?? i
+        if (!map.has(c)) map.set(c, [])
+        map.get(c).push(b)
+    })
+    return [...map.entries()].sort((a, b) => a[0] - b[0]).map(([, list]) => list)
+}
+const fromColumns = (cols) => cols.flatMap((list, ci) => list.map((b) => ({ ...b, col: ci })))
+const normalizeBlocks = (blocks) => fromColumns(columnsOf(blocks))
+
+const noShift = () => null
+const collide = (args) => {
+    if (String(args.active.id).startsWith('scenario:')) {
+        return closestCenter({
+            ...args,
+            droppableContainers: args.droppableContainers.filter((c) =>
+                String(c.id).startsWith('scenario:'),
+            ),
+        })
+    }
+    const hits = pointerWithin(args)
+    return hits.length ? hits : closestCenter(args)
+}
 
 const situations = [
     { type: 'water', label: 'Отключили воду' },
@@ -40,6 +67,179 @@ const situations = [
     { type: 'hot', label: 'Температура выше', unit: '°C', value: 28 },
 ]
 const situationOf = (type, list) => list.find((s) => s.type === type)
+
+const paramTypes = [
+    { type: 'switch', label: 'Вкл / выкл' },
+    { type: 'counter', label: 'Число' },
+    { type: 'list', label: 'Список' },
+    { type: 'color', label: 'Цвет' },
+    { type: 'text', label: 'Текст' },
+]
+
+const P = (id, label, type, access, value, extra = {}) => ({ id, label, type, access, value, ...extra })
+
+const asParam = (p) =>
+    typeof p === 'string' ? { id: p, label: p, type: 'text', access: 'r', value: '' } : p
+const canWrite = (p) => String(p.access ?? 'r').includes('w')
+
+const paramValueText = (p) => {
+    const v = p.value
+    if (p.type === 'switch') return v ? 'Вкл' : 'Выкл'
+    if (p.type === 'list') return p.layout?.[v] ?? String(v)
+    if (p.type === 'counter') return `${v}${p.unit ? ` ${p.unit}` : ''}`
+    return String(v ?? '')
+}
+const paramLine = (p) =>
+    p.type === 'text' && p.value === '' ? p.label : `${p.label}: ${paramValueText(p)}`
+
+const clampNum = (v, p) => {
+    let n = Number(v)
+    if (!Number.isFinite(n)) n = p.min ?? 0
+    if (p.min != null) n = Math.max(p.min, n)
+    if (p.max != null) n = Math.min(p.max, n)
+    return n
+}
+
+const barrierStates = { 0: 'закрыто', 1: 'открывается', 2: 'открыто', 3: 'закрывается', 4: 'удержание' }
+
+const deviceCatalog = [
+    {
+        key: 'leak',
+        name: 'Датчик протечки',
+        params: [
+            P('state', 'Состояние', 'list', 'r', 0, { layout: { 0: 'сухо', 1: 'протечка' } }),
+            P('battery', 'Заряд', 'counter', 'r', 100, { unit: '%', min: 0, max: 100 }),
+            P('sensitivity', 'Чувствительность', 'counter', 'rw', 5, { min: 1, max: 10 }),
+        ],
+    },
+    {
+        key: 'barrier',
+        name: 'Шлагбаум',
+        params: [
+            P('open_cmd', 'Открыть', 'switch', 'rw', 0),
+            P('hold_time', 'Держать открытым', 'counter', 'rw', 10, { unit: 'c', min: 0, max: 300 }),
+            P('state', 'Состояние стрелы', 'list', 'r', 0, { layout: barrierStates }),
+            P('obstacle', 'Предмет под стрелой', 'list', 'r', 0, { layout: { 0: 'нет', 1: 'есть' } }),
+            P('alarm', 'Авария', 'list', 'r', 0, { layout: { 0: 'нет', 1: 'застревание' } }),
+            P('cycles', 'Циклов открытий', 'counter', 'r', 0),
+        ],
+    },
+    {
+        key: 'thermostat',
+        name: 'Термостат',
+        params: [
+            P('target', 'Нужная температура', 'counter', 'rw', 22, { unit: '°C', min: 16, max: 30 }),
+            P('current', 'Сейчас', 'counter', 'r', 21, { unit: '°C' }),
+            P('mode', 'Режим', 'list', 'rw', 2, { layout: { 0: 'выкл', 1: 'нагрев', 2: 'авто' } }),
+        ],
+    },
+    {
+        key: 'elevator',
+        name: 'Лифт',
+        params: [
+            P('call', 'Вызвать на этаж', 'counter', 'rw', 1, { min: 1, max: 25 }),
+            P('floor', 'Текущий этаж', 'counter', 'r', 1),
+            P('state', 'Состояние', 'list', 'r', 0, { layout: { 0: 'стоит', 1: 'едет', 2: 'двери открыты' } }),
+        ],
+    },
+    {
+        key: 'hub',
+        name: 'Хаб протечек',
+        params: [
+            P('siren', 'Сирена', 'switch', 'rw', 1),
+            P('count', 'Датчиков подключено', 'counter', 'r', 0),
+            P('state', 'Состояние', 'list', 'r', 0, { layout: { 0: 'норма', 1: 'протечка' } }),
+        ],
+    },
+    {
+        key: 'counter',
+        name: 'Счётчик',
+        params: [
+            P('send', 'Передавать показания', 'switch', 'rw', 1),
+            P('reading', 'Показания', 'counter', 'r', 0, { unit: 'м³' }),
+        ],
+    },
+    {
+        key: 'ventilation',
+        name: 'Вентиляция',
+        params: [
+            P('speed', 'Скорость', 'counter', 'rw', 2, { min: 1, max: 3 }),
+            P('mode', 'Режим', 'list', 'rw', 0, { layout: { 0: 'авто', 1: 'ручной' } }),
+        ],
+    },
+    {
+        key: 'fire',
+        name: 'Датчик пожара',
+        params: [
+            P('sensitivity', 'Чувствительность', 'counter', 'rw', 3, { min: 1, max: 5 }),
+            P('smoke', 'Уровень дыма', 'counter', 'r', 0, { unit: '%' }),
+            P('state', 'Состояние', 'list', 'r', 0, { layout: { 0: 'норма', 1: 'пожар' } }),
+        ],
+    },
+    {
+        key: 'light',
+        name: 'Освещение',
+        params: [
+            P('brightness', 'Яркость', 'counter', 'rw', 80, { unit: '%', min: 0, max: 100 }),
+            P('color', 'Цвет', 'color', 'rw', '#ffd9a0'),
+        ],
+    },
+]
+
+const catalogRules = [
+    ['hub', /хаб/],
+    ['leak', /протеч/],
+    ['barrier', /шлагбаум/],
+    ['thermostat', /термостат|температур|отоплен|климат|тёплый пол|теплый пол/],
+    ['elevator', /лифт/],
+    ['counter', /счётчик|счетчик/],
+    ['ventilation', /вентиля|кондиционер/],
+    ['fire', /пожар|дым/],
+    ['light', /ламп|свет|освещ|торшер|люстр/],
+]
+
+const legacyParam = (str, i) => {
+    const [label, ...rest] = String(str).split(':')
+    return {
+        id: `legacy${i}`,
+        label: rest.length ? label.trim() : String(str),
+        type: 'text',
+        access: 'rw',
+        value: rest.join(':').trim(),
+    }
+}
+
+const upgradeDevice = (d) => {
+    const params = d.params ?? []
+    if (params.length > 0 && params.every((p) => typeof p !== 'string')) return d
+    const key = catalogRules.find(([, re]) => re.test(String(d.name).toLowerCase()))?.[0]
+    const item = deviceCatalog.find((x) => x.key === key)
+    if (item) return { ...d, params: item.params.map((p) => ({ ...p })) }
+    return { ...d, params: params.map(legacyParam) }
+}
+
+const reactions = [
+    { type: 'off', label: 'Выключить устройства сценария' },
+    { type: 'on', label: 'Включить устройства сценария' },
+    { type: 'notify', label: 'Прислать уведомление' },
+    { type: 'support', label: 'Обратиться в техподдержку' },
+    { type: 'none', label: 'Ничего не делать' },
+    { type: 'custom', label: 'Своё действие' },
+]
+
+const reactionText = (c) => {
+    const r = reactions.find((x) => x.type === (c.action ?? 'off'))
+    if (!r) return ''
+    if (r.type === 'custom') return c.actionText?.trim() || 'Своё действие'
+    return r.label
+}
+
+const supportTopics = [
+    'Устройство не работает',
+    'Не срабатывает сценарий',
+    'Вопрос по ситуациям',
+    'Другое',
+]
 
 const condText = (c, list) => {
     const s = situationOf(c.type, list)
@@ -64,18 +264,39 @@ const durationText = (e) =>
         ? `${e.amount} ${plural(e.amount, ['день', 'дня', 'дней'])}`
         : `${e.amount} ${plural(e.amount, ['час', 'часа', 'часов'])}`
 
-function HomePage({ devices, scenarios, emergencies, sits, onStart, onEnd }) {
+function HomePage({
+    devices,
+    scenarios,
+    emergencies,
+    sits,
+    tickets,
+    onStart,
+    onEnd,
+    onTicket,
+    onCloseTicket,
+}) {
     const options = sits.filter((s) => !s.unit && s.type !== 'night')
     const [type, setType] = useState(options[0]?.type ?? '__custom')
     const [name, setName] = useState('')
     const [amount, setAmount] = useState(2)
     const [unit, setUnit] = useState('d')
+    const [topic, setTopic] = useState(supportTopics[0])
+    const [ticketDevice, setTicketDevice] = useState('')
+    const [ticketText, setTicketText] = useState('')
+    const openTickets = tickets.filter((t) => !t.done).length
+
+    const sendTicket = () => {
+        onTicket({ subject: topic, deviceId: ticketDevice || null, text: ticketText.trim() })
+        setTicketText('')
+    }
 
     const custom = type === '__custom'
     const canStart = Number(amount) >= 1 && (!custom || name.trim().length > 0)
     const onCount = devices.filter((d) => d.on).length
     const affected = (e) =>
-        scenarios.filter((s) => (s.conditions ?? []).some((c) => c.type === e.type))
+        scenarios
+            .map((s) => ({ s, c: (s.conditions ?? []).find((c) => c.type === e.type) }))
+            .filter((x) => x.c)
     const hasAlerts = emergencies.length > 0
 
     const start = () => {
@@ -119,7 +340,7 @@ function HomePage({ devices, scenarios, emergencies, sits, onStart, onEnd }) {
                                 </div>
                                 <div className="emergency-sub">
                                     {list.length > 0
-                                        ? `Затронуты сценарии: ${list.map((s) => s.title).join(', ')}`
+                                        ? list.map(({ s, c }) => `${s.title}: ${reactionText(c)}`).join('; ')
                                         : 'Сценарии не затронуты'}
                                 </div>
                             </div>
@@ -180,13 +401,83 @@ function HomePage({ devices, scenarios, emergencies, sits, onStart, onEnd }) {
                     Запустить
                 </button>
             </section>
+
+            <section className="card panel">
+                <div className="status">
+                    <h2>Техподдержка</h2>
+                    <span className="status-value">{openTickets > 0 ? openTickets : 'Нет проблем'}</span>
+                </div>
+
+                {tickets.length === 0 && <span className="hint">Открытых обращений нет</span>}
+
+                {tickets.slice(0, 5).map((t) => {
+                    const dev = devices.find((d) => d.id === t.deviceId)
+                    return (
+                        <div key={t.id} className={`ticket ${t.done ? 'done' : ''}`}>
+                            <div>
+                                <div className="ticket-name">{t.subject}</div>
+                                <div className="ticket-sub">
+                                    {[dev?.name, t.text, t.auto ? 'Создано сценарием' : null]
+                                        .filter(Boolean)
+                                        .join(' · ')}
+                                </div>
+                            </div>
+                            {t.done ? (
+                                <span className="hint">Закрыто</span>
+                            ) : (
+                                <button onClick={() => onCloseTicket(t.id)}>Закрыть</button>
+                            )}
+                        </div>
+                    )
+                })}
+
+                <label className="field">
+                    Тема
+                    <select value={topic} onChange={(e) => setTopic(e.target.value)}>
+                        {supportTopics.map((t) => (
+                            <option key={t} value={t}>
+                                {t}
+                            </option>
+                        ))}
+                    </select>
+                </label>
+
+                <label className="field">
+                    Устройство (необязательно)
+                    <select value={ticketDevice} onChange={(e) => setTicketDevice(e.target.value)}>
+                        <option value="">Не выбрано</option>
+                        {devices.map((d) => (
+                            <option key={d.id} value={d.id}>
+                                {d.name}
+                            </option>
+                        ))}
+                    </select>
+                </label>
+
+                <label className="field">
+                    Что случилось
+                    <input
+                        value={ticketText}
+                        maxLength={120}
+                        placeholder="Опишите проблему"
+                        onChange={(e) => setTicketText(e.target.value)}
+                    />
+                </label>
+
+                <button className="btn" disabled={ticketText.trim().length === 0} onClick={sendTicket}>
+                    Написать в техподдержку
+                </button>
+            </section>
         </>
     )
 }
 
-function DeviceCard({ device, onToggle, onRemove }) {
+function DeviceCard({ device, onToggle, onRemove, onEdit }) {
+    const params = (device.params ?? []).map(asParam)
+    const shown = params.slice(0, 3)
+    const rest = params.length - shown.length
     return (
-        <article className={`card device ${device.on ? 'is-on' : ''}`}>
+        <article className={`card device ${device.on ? 'is-on' : ''}`} onClick={() => onEdit(device.id)}>
             <div className="device-top">
                 <span className="device-state">{device.on ? 'Включено' : 'Выключено'}</span>
                 <button
@@ -194,40 +485,378 @@ function DeviceCard({ device, onToggle, onRemove }) {
                     role="switch"
                     aria-checked={device.on}
                     aria-label={`Переключить ${device.name}`}
-                    onClick={() => onToggle(device.id)}
+                    onClick={(e) => {
+                        e.stopPropagation()
+                        onToggle(device.id)
+                    }}
                 >
                     <span className="knob" />
                 </button>
             </div>
 
-            <h2 className="device-name">{device.name}</h2>
+            <div className="device-head">
+                <h2 className="device-name">{device.name}</h2>
+                {device.ujin && <span className="ujin">Ujin</span>}
+            </div>
 
             <ul className="params">
-                {device.params.map((p) => (
-                    <li key={p}>{p}</li>
+                {shown.map((p) => (
+                    <li key={p.id}>{paramLine(p)}</li>
                 ))}
+                {rest > 0 && <li>ещё {rest}</li>}
             </ul>
 
-            <button className="link" onClick={() => onRemove(device.id)}>
+            <button
+                className="link"
+                onClick={(e) => {
+                    e.stopPropagation()
+                    onRemove(device.id)
+                }}
+            >
                 Удалить
             </button>
         </article>
     )
 }
 
-function DevicesPage({ devices, onToggle, onRemove, onAdd }) {
+function DevicesPage({ devices, onToggle, onRemove, onAdd, onEdit }) {
     return (
         <>
             {devices.length === 0 && <p className="empty">Устройств пока нет</p>}
             <div className="device-list">
                 {devices.map((d) => (
-                    <DeviceCard key={d.id} device={d} onToggle={onToggle} onRemove={onRemove} />
+                    <DeviceCard key={d.id} device={d} onToggle={onToggle} onRemove={onRemove} onEdit={onEdit} />
                 ))}
             </div>
             <button className="card add" onClick={onAdd}>
                 Добавить новое устройство +
             </button>
         </>
+    )
+}
+
+function ParamField({ p, onChange }) {
+    if (p.type === 'switch') {
+        return (
+            <div className="param-row">
+                <span>{p.label}</span>
+                <button
+                    className="toggle"
+                    role="switch"
+                    aria-checked={!!p.value}
+                    aria-label={p.label}
+                    onClick={() => onChange(p.value ? 0 : 1)}
+                >
+                    <span className="knob" />
+                </button>
+            </div>
+        )
+    }
+    if (p.type === 'list') {
+        return (
+            <label className="field">
+                {p.label}
+                <select value={p.value} onChange={(e) => onChange(Number(e.target.value))}>
+                    {Object.entries(p.layout ?? {}).map(([k, label]) => (
+                        <option key={k} value={k}>
+                            {label}
+                        </option>
+                    ))}
+                </select>
+            </label>
+        )
+    }
+    if (p.type === 'counter') {
+        return (
+            <label className="field">
+                {p.label}
+                {p.unit ? `, ${p.unit}` : ''}
+                {p.min != null && p.max != null ? ` (${p.min}–${p.max})` : ''}
+                <input
+                    type="number"
+                    inputMode="numeric"
+                    min={p.min}
+                    max={p.max}
+                    value={p.value}
+                    onChange={(e) => onChange(e.target.value)}
+                />
+            </label>
+        )
+    }
+    return (
+        <label className="field">
+            {p.label}
+            <input
+                type={p.type === 'color' ? 'color' : 'text'}
+                value={p.value ?? ''}
+                maxLength={60}
+                onChange={(e) => onChange(e.target.value)}
+            />
+        </label>
+    )
+}
+
+function DeviceSheet({ device, onSave, onClose }) {
+    const [params, setParams] = useState(() => (device.params ?? []).map((p) => ({ ...asParam(p) })))
+    const setValue = (id, value) =>
+        setParams((ps) => ps.map((p) => (p.id === id ? { ...p, value } : p)))
+
+    const editable = params.filter((p) => canWrite(p))
+    const readonly = params.filter((p) => !canWrite(p))
+
+    const save = () =>
+        onSave(
+            device.id,
+            params.map((p) => (p.type === 'counter' ? { ...p, value: clampNum(p.value, p) } : p)),
+        )
+
+    return (
+        <div className="backdrop" onClick={onClose}>
+            <div className="sheet" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
+                <div className="device-head">
+                    <h3>{device.name}</h3>
+                    {device.ujin && <span className="ujin">Ujin</span>}
+                </div>
+                <p className="sheet-sub">Изменения применяются ко всем сценариям с этим устройством</p>
+
+                {params.length === 0 && <span className="hint">У устройства нет параметров</span>}
+
+                {editable.length > 0 && <div className="sheet-part">Параметры</div>}
+                {editable.map((p) => (
+                    <ParamField key={p.id} p={p} onChange={(v) => setValue(p.id, v)} />
+                ))}
+
+                {readonly.length > 0 && <div className="sheet-part">Только чтение</div>}
+                {readonly.map((p) => (
+                    <div key={p.id} className="param-row ro">
+                        <span>{p.label}</span>
+                        {!(p.type === 'text' && p.value === '') && <span>{paramValueText(p)}</span>}
+                    </div>
+                ))}
+
+                <div className="sheet-actions">
+                    <button onClick={onClose}>Отмена</button>
+                    <button className="btn-primary" onClick={save}>
+                        Сохранить
+                    </button>
+                </div>
+            </div>
+        </div>
+    )
+}
+
+const newRow = () => ({
+    key: uid('r'),
+    label: '',
+    type: 'switch',
+    unit: '',
+    min: '',
+    max: '',
+    options: '',
+    value: '',
+})
+
+const rowOk = (r) =>
+    r.label.trim().length > 0 &&
+    (r.type !== 'list' || r.options.split(',').filter((x) => x.trim()).length >= 2)
+
+const buildParam = (r) => {
+    const base = { id: uid('p'), label: r.label.trim(), type: r.type, access: 'rw' }
+    if (r.type === 'switch') return { ...base, value: 0 }
+    if (r.type === 'color') return { ...base, value: '#ffffff' }
+    if (r.type === 'text') return { ...base, value: r.value.trim() }
+    if (r.type === 'list') {
+        const opts = r.options
+            .split(',')
+            .map((x) => x.trim())
+            .filter(Boolean)
+        return { ...base, value: 0, layout: Object.fromEntries(opts.map((o, i) => [i, o])) }
+    }
+    const min = r.min === '' ? undefined : Number(r.min)
+    const max = r.max === '' ? undefined : Number(r.max)
+    const p = { ...base, unit: r.unit.trim() || undefined, min, max }
+    return { ...p, value: clampNum(0, p) }
+}
+
+function AddDeviceSheet({ onSave, onClose }) {
+    const [mode, setMode] = useState('catalog')
+    const [key, setKey] = useState(deviceCatalog[0].key)
+    const [name, setName] = useState('')
+    const [rows, setRows] = useState([])
+
+    const custom = mode === 'custom'
+    const item = deviceCatalog.find((d) => d.key === key)
+    const canSave = !custom || (name.trim().length > 0 && rows.every(rowOk))
+
+    const patch = (k, data) => setRows((rs) => rs.map((r) => (r.key === k ? { ...r, ...data } : r)))
+
+    const save = () =>
+        custom
+            ? onSave({ name: name.trim(), params: rows.map(buildParam), ujin: false })
+            : onSave({ name: item.name, params: item.params.map((p) => ({ ...p })), ujin: true })
+
+    return (
+        <div className="backdrop" onClick={onClose}>
+            <div className="sheet" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
+                <h3>Добавить устройство</h3>
+
+                <div className="dock-tabs sheet-tabs">
+                    <button className={!custom ? 'active' : ''} onClick={() => setMode('catalog')}>
+                        Из списка
+                    </button>
+                    <button className={custom ? 'active' : ''} onClick={() => setMode('custom')}>
+                        Своё
+                    </button>
+                </div>
+
+                {!custom && (
+                    <>
+                        <label className="field">
+                            Устройство
+                            <select value={key} onChange={(e) => setKey(e.target.value)}>
+                                {deviceCatalog.map((d) => (
+                                    <option key={d.key} value={d.key}>
+                                        {d.name}
+                                    </option>
+                                ))}
+                            </select>
+                        </label>
+                        <ul className="params">
+                            {item.params.map((p) => (
+                                <li key={p.id}>{paramLine(p)}</li>
+                            ))}
+                        </ul>
+                        <div className="sheet-ujin">
+                            <span className="ujin">Ujin</span>
+                            Устройство одобрено и подтягивается из Ujin
+                        </div>
+                    </>
+                )}
+
+                {custom && (
+                    <>
+                        <label className="field">
+                            Название
+                            <input
+                                autoFocus
+                                value={name}
+                                maxLength={40}
+                                placeholder="Например, Умная розетка"
+                                onChange={(e) => setName(e.target.value)}
+                            />
+                        </label>
+
+                        <div className="sheet-part">Параметры</div>
+
+                        {rows.length === 0 && <span className="hint">Параметров пока нет</span>}
+
+                        {rows.map((r, i) => (
+                            <div key={r.key} className="param-draft">
+                                <div className="param-draft-head">
+                                    <span>Параметр {i + 1}</span>
+                                    <button
+                                        className="x"
+                                        onClick={() => setRows((rs) => rs.filter((x) => x.key !== r.key))}
+                                        aria-label="Убрать параметр"
+                                    >
+                                        ×
+                                    </button>
+                                </div>
+
+                                <label className="field">
+                                    Название
+                                    <input
+                                        value={r.label}
+                                        maxLength={30}
+                                        placeholder="Например, Яркость"
+                                        onChange={(e) => patch(r.key, { label: e.target.value })}
+                                    />
+                                </label>
+
+                                <label className="field">
+                                    Тип
+                                    <select value={r.type} onChange={(e) => patch(r.key, { type: e.target.value })}>
+                                        {paramTypes.map((t) => (
+                                            <option key={t.type} value={t.type}>
+                                                {t.label}
+                                            </option>
+                                        ))}
+                                    </select>
+                                </label>
+
+                                {r.type === 'counter' && (
+                                    <div className="row">
+                                        <label className="field">
+                                            Единицы
+                                            <input
+                                                value={r.unit}
+                                                maxLength={6}
+                                                placeholder="%"
+                                                onChange={(e) => patch(r.key, { unit: e.target.value })}
+                                            />
+                                        </label>
+                                        <label className="field">
+                                            Мин
+                                            <input
+                                                type="number"
+                                                inputMode="numeric"
+                                                value={r.min}
+                                                onChange={(e) => patch(r.key, { min: e.target.value })}
+                                            />
+                                        </label>
+                                        <label className="field">
+                                            Макс
+                                            <input
+                                                type="number"
+                                                inputMode="numeric"
+                                                value={r.max}
+                                                onChange={(e) => patch(r.key, { max: e.target.value })}
+                                            />
+                                        </label>
+                                    </div>
+                                )}
+
+                                {r.type === 'list' && (
+                                    <label className="field">
+                                        Варианты через запятую (минимум два)
+                                        <input
+                                            value={r.options}
+                                            maxLength={80}
+                                            placeholder="Тихо, Средне, Громко"
+                                            onChange={(e) => patch(r.key, { options: e.target.value })}
+                                        />
+                                    </label>
+                                )}
+
+                                {r.type === 'text' && (
+                                    <label className="field">
+                                        Значение
+                                        <input
+                                            value={r.value}
+                                            maxLength={60}
+                                            onChange={(e) => patch(r.key, { value: e.target.value })}
+                                        />
+                                    </label>
+                                )}
+                            </div>
+                        ))}
+
+                        <button className="sheet-add" onClick={() => setRows((rs) => [...rs, newRow()])}>
+                            Добавить параметр +
+                        </button>
+
+                        <span className="hint">Своё устройство не одобрено Ujin</span>
+                    </>
+                )}
+
+                <div className="sheet-actions">
+                    <button onClick={onClose}>Отмена</button>
+                    <button className="btn-primary" disabled={!canSave} onClick={save}>
+                        Добавить
+                    </button>
+                </div>
+            </div>
+        </div>
     )
 }
 
@@ -264,7 +893,7 @@ function SituationChip({ situation, wide }) {
     )
 }
 
-function Block({ block, device, onRemove }) {
+function Block({ block, device, onRemove, onEdit }) {
     const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
         useSortable({ id: `block:${block.id}` })
     return (
@@ -274,12 +903,38 @@ function Block({ block, device, onRemove }) {
             style={{ transform: CSS.Transform.toString(transform), transition }}
             {...attributes}
             {...listeners}
+            onClick={() => device && onEdit(device.id)}
         >
             <span className={`dot ${device?.on ? 'on' : ''}`} />
             <span>{device?.name ?? '?'}</span>
-            <button className="x" onClick={() => onRemove(block.id)} aria-label="Убрать из сценария">
+            <button
+                className="x"
+                onClick={(e) => {
+                    e.stopPropagation()
+                    onRemove(block.id)
+                }}
+                aria-label="Убрать из сценария"
+            >
                 ×
             </button>
+        </div>
+    )
+}
+
+function Column({ id, children }) {
+    const { setNodeRef } = useDroppable({ id })
+    return (
+        <div ref={setNodeRef} className="gcol">
+            {children}
+        </div>
+    )
+}
+
+function Gap({ id, last }) {
+    const { setNodeRef, isOver } = useDroppable({ id })
+    return (
+        <div ref={setNodeRef} className={`gap ${last ? 'last' : ''} ${isOver ? 'over' : ''}`}>
+            {last ? '+' : ''}
         </div>
     )
 }
@@ -294,11 +949,13 @@ function Scenario({
     onAddCond,
     onEditCond,
     onRemoveCond,
+    onEditDevice,
 }) {
     const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
         useSortable({ id: `scenario:${scenario.id}` })
     const inputRef = useRef(null)
     const conditions = scenario.conditions ?? []
+    const columns = columnsOf(scenario.blocks)
     return (
         <section
             ref={setNodeRef}
@@ -338,23 +995,33 @@ function Scenario({
                 </button>
             </header>
 
-            <div className="blocks">
-                <SortableContext
-                    items={scenario.blocks.map((b) => `block:${b.id}`)}
-                    strategy={rectSortingStrategy}
-                >
-                    {scenario.blocks.map((b) => (
-                        <Block
-                            key={b.id}
-                            block={b}
-                            device={devices.find((d) => d.id === b.deviceId)}
-                            onRemove={onRemoveBlock}
-                        />
+            <div className="conds-title gantt-hint">
+                Рядом - по очереди, друг под другом - одновременно
+            </div>
+
+            <div className="blocks gantt">
+                <SortableContext items={columns.flat().map((b) => `block:${b.id}`)} strategy={noShift}>
+                    {columns.map((col, ci) => (
+                        <Fragment key={ci}>
+                            <Gap id={`gap:${scenario.id}:${ci}`} />
+                            <Column id={`col:${scenario.id}:${ci}`}>
+                                {col.map((b) => (
+                                    <Block
+                                        key={b.id}
+                                        block={b}
+                                        device={devices.find((d) => d.id === b.deviceId)}
+                                        onRemove={onRemoveBlock}
+                                        onEdit={onEditDevice}
+                                    />
+                                ))}
+                            </Column>
+                        </Fragment>
                     ))}
+                    {scenario.blocks.length === 0 && (
+                        <span className="hint">Необходимо перенести устройство из панели внизу</span>
+                    )}
+                    <Gap id={`gap:${scenario.id}:${columns.length}`} last />
                 </SortableContext>
-                {scenario.blocks.length === 0 && (
-                    <span className="hint">Необходимо перенести устройство из панели внизу</span>
-                )}
             </div>
 
             <div className="conds">
@@ -363,7 +1030,8 @@ function Scenario({
                     {conditions.map((c) => (
                         <div key={c.id} className="cond-wrap">
                             <button className="cond" onClick={() => onEditCond(scenario.id, c.id)}>
-                                {condText(c, sits)}
+                                <span className="cond-if">Если: {condText(c, sits)}</span>
+                                <span className="cond-then">То: {reactionText(c)}</span>
                             </button>
                             <button
                                 className="x cond-x"
@@ -397,6 +1065,7 @@ function ScenariosPage({
     onAddCond,
     onEditCond,
     onRemoveCond,
+    onEditDevice,
 }) {
     return (
         <>
@@ -416,6 +1085,7 @@ function ScenariosPage({
                         onAddCond={onAddCond}
                         onEditCond={onEditCond}
                         onRemoveCond={onRemoveCond}
+                        onEditDevice={onEditDevice}
                     />
                 ))}
             </SortableContext>
@@ -437,10 +1107,13 @@ function ConditionSheet({ sheet, scenarios, sits, onSave, onDelete, onClose }) {
         existing?.value ?? situationOf(existing?.type ?? sits[0].type, sits)?.value ?? '',
     )
     const [newName, setNewName] = useState('')
+    const [action, setAction] = useState(existing?.action ?? 'off')
+    const [actionText, setActionText] = useState(existing?.actionText ?? '')
 
     const isNew = type === '__new'
     const sit = situationOf(type, sits)
-    const canSave = !isNew || newName.trim().length > 0
+    const canSave =
+        (!isNew || newName.trim().length > 0) && (action !== 'custom' || actionText.trim().length > 0)
 
     const changeType = (t) => {
         setType(t)
@@ -453,6 +1126,8 @@ function ConditionSheet({ sheet, scenarios, sits, onSave, onDelete, onClose }) {
             <div className="sheet" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
                 <h3>{existing ? 'Ситуация' : 'Добавить ситуацию'}</h3>
                 <p className="sheet-sub">Сценарий: {scenario?.title}</p>
+
+                <div className="sheet-part">Если</div>
 
                 <label className="field">
                     Что произошло
@@ -497,6 +1172,31 @@ function ConditionSheet({ sheet, scenarios, sits, onSave, onDelete, onClose }) {
                     </label>
                 )}
 
+                <div className="sheet-part">То</div>
+
+                <label className="field">
+                    Что произойдёт
+                    <select value={action} onChange={(e) => setAction(e.target.value)}>
+                        {reactions.map((r) => (
+                            <option key={r.type} value={r.type}>
+                                {r.label}
+                            </option>
+                        ))}
+                    </select>
+                </label>
+
+                {action === 'custom' && (
+                    <label className="field">
+                        Опиши действие
+                        <input
+                            value={actionText}
+                            maxLength={60}
+                            placeholder="Например, Закрыть кран"
+                            onChange={(e) => setActionText(e.target.value)}
+                        />
+                    </label>
+                )}
+
                 <div className="sheet-actions">
                     <button onClick={onClose}>Отмена</button>
                     {existing && (
@@ -513,6 +1213,8 @@ function ConditionSheet({ sheet, scenarios, sits, onSave, onDelete, onClose }) {
                                 newLabel: isNew ? newName : undefined,
                                 time: sit?.noTime ? '' : time,
                                 value: sit?.unit ? value : '',
+                                action,
+                                actionText: action === 'custom' ? actionText : '',
                             })
                         }
                     >
@@ -566,15 +1268,18 @@ const tabsList = [
 
 export default function App() {
     const [tab, setTab] = useState('home')
-    const [devices, setDevices] = useState(initialDevices)
+    const [devices, setDevices] = useState(() => initialDevices.map(upgradeDevice))
     const [scenarios, setScenarios] = useState(initialScenarios)
     const [customSituations, setCustomSituations] = useState([])
     const [emergencies, setEmergencies] = useState([])
+    const [tickets, setTickets] = useState([])
     const [activeId, setActiveId] = useState(null)
     const [dockOpen, setDockOpen] = useState(false)
     const [dockKind, setDockKind] = useState('devices')
     const [sheet, setSheet] = useState(null)
     const [newSitOpen, setNewSitOpen] = useState(false)
+    const [addDevOpen, setAddDevOpen] = useState(false)
+    const [editDevId, setEditDevId] = useState(null)
 
     const sits = [...situations, ...customSituations]
 
@@ -586,15 +1291,20 @@ export default function App() {
     const toggleDevice = (id) =>
         setDevices((ds) => ds.map((d) => (d.id === id ? { ...d, on: !d.on } : d)))
 
-    const addDevice = () => {
-        const t = deviceTemplates[devices.length % deviceTemplates.length]
-        setDevices((ds) => [...ds, { id: uid('d'), on: false, ...t }])
+    const addDevice = (data) => {
+        setDevices((ds) => [...ds, { id: uid('d'), on: false, ...data }])
+        setAddDevOpen(false)
+    }
+
+    const saveDeviceParams = (id, params) => {
+        setDevices((ds) => ds.map((d) => (d.id === id ? { ...d, params } : d)))
+        setEditDevId(null)
     }
 
     const removeDevice = (id) => {
         setDevices((ds) => ds.filter((d) => d.id !== id))
         setScenarios((ss) =>
-            ss.map((s) => ({ ...s, blocks: s.blocks.filter((b) => b.deviceId !== id) })),
+            ss.map((s) => ({ ...s, blocks: normalizeBlocks(s.blocks.filter((b) => b.deviceId !== id)) })),
         )
     }
 
@@ -611,7 +1321,7 @@ export default function App() {
 
     const removeBlock = (blockId) =>
         setScenarios((ss) =>
-            ss.map((s) => ({ ...s, blocks: s.blocks.filter((b) => b.id !== blockId) })),
+            ss.map((s) => ({ ...s, blocks: normalizeBlocks(s.blocks.filter((b) => b.id !== blockId)) })),
         )
 
     const addCustomSituation = (label) => {
@@ -630,7 +1340,29 @@ export default function App() {
             ...es,
             { id: uid('e'), type: sit.type, label: sit.label, amount, unit },
         ])
+
+        const auto = scenarios.filter((s) =>
+            (s.conditions ?? []).some((c) => c.type === sit.type && c.action === 'support'),
+        )
+        if (auto.length > 0)
+            setTickets((ts) => [
+                ...auto.map((s) => ({
+                    id: uid('t'),
+                    subject: sit.label,
+                    text: `Сценарий «${s.title}»`,
+                    deviceId: null,
+                    done: false,
+                    auto: true,
+                })),
+                ...ts,
+            ])
     }
+
+    const addTicket = (data) =>
+        setTickets((ts) => [{ id: uid('t'), done: false, auto: false, ...data }, ...ts])
+
+    const closeTicket = (id) =>
+        setTickets((ts) => ts.map((t) => (t.id === id ? { ...t, done: true } : t)))
 
     const endEmergency = (id) => setEmergencies((es) => es.filter((e) => e.id !== id))
 
@@ -677,16 +1409,24 @@ export default function App() {
         setActiveId(null)
         if (!over || active.id === over.id) return
         const [aType, aId] = split(active.id)
-        const [oType, oId] = split(over.id)
+        const oParts = split(over.id)
+        const [oType, oId] = oParts
+
+        const scenarioIdOf = (list) =>
+            oType === 'block' ? scenarioOfBlock(list, oId)?.id : oId
 
         if (aType === 'cond') {
-            const target =
-                oType === 'scenario'
-                    ? scenarios.find((s) => s.id === oId)
-                    : scenarioOfBlock(scenarios, oId)
+            const target = scenarios.find((s) => s.id === scenarioIdOf(scenarios))
             const sit = situationOf(aId, sits)
             if (!target || !sit) return
-            const nc = { id: uid('c'), type: aId, time: '', value: sit.value ?? '' }
+            const nc = {
+                id: uid('c'),
+                type: aId,
+                time: '',
+                value: sit.value ?? '',
+                action: 'off',
+                actionText: '',
+            }
             setScenarios((prev) =>
                 prev.map((s) =>
                     s.id === target.id ? { ...s, conditions: [...(s.conditions ?? []), nc] } : s,
@@ -697,8 +1437,7 @@ export default function App() {
         }
 
         setScenarios((prev) => {
-            const target =
-                oType === 'scenario' ? prev.find((s) => s.id === oId) : scenarioOfBlock(prev, oId)
+            const target = prev.find((s) => s.id === scenarioIdOf(prev))
             if (!target) return prev
 
             if (aType === 'scenario') {
@@ -707,40 +1446,58 @@ export default function App() {
                 return arrayMove(prev, from, to)
             }
 
-            const insertAt =
-                oType === 'block' ? target.blocks.findIndex((b) => b.id === oId) : target.blocks.length
-
+            let moved
+            let src = null
             if (aType === 'device') {
-                const nb = { id: uid('b'), deviceId: aId }
-                return prev.map((s) =>
-                    s.id === target.id
-                        ? { ...s, blocks: [...s.blocks.slice(0, insertAt), nb, ...s.blocks.slice(insertAt)] }
-                        : s,
+                moved = { id: uid('b'), deviceId: aId }
+            } else if (aType === 'block') {
+                src = scenarioOfBlock(prev, aId)
+                moved = src?.blocks.find((b) => b.id === aId)
+                if (!moved) return prev
+            } else {
+                return prev
+            }
+
+            const tCols = columnsOf(target.blocks).map((c) => [...c])
+            const sCols = src && src.id !== target.id ? columnsOf(src.blocks).map((c) => [...c]) : tCols
+
+            let place
+            if (oType === 'block') {
+                const col = tCols.find((c) => c.some((b) => b.id === oId))
+                if (!col) return prev
+                const ti = col.findIndex((b) => b.id === oId)
+                const mi = col.findIndex((b) => b.id === aId)
+                const above = mi > ti
+                place = () => {
+                    const i = col.findIndex((b) => b.id === oId)
+                    col.splice(above ? i : i + 1, 0, moved)
+                }
+            } else if (oType === 'col') {
+                const col = tCols[Number(oParts[2])]
+                if (!col) return prev
+                place = () => col.push(moved)
+            } else if (oType === 'gap') {
+                const ref = tCols[Number(oParts[2])]
+                place = () => tCols.splice(ref ? tCols.indexOf(ref) : tCols.length, 0, [moved])
+            } else {
+                place = () => tCols.push([moved])
+            }
+
+            if (src) {
+                const from = sCols.find((c) => c.some((b) => b.id === aId))
+                from.splice(
+                    from.findIndex((b) => b.id === aId),
+                    1,
                 )
             }
+            place()
 
-            if (aType === 'block') {
-                const src = scenarioOfBlock(prev, aId)
-                if (!src) return prev
-                if (src.id === target.id) {
-                    const from = src.blocks.findIndex((b) => b.id === aId)
-                    const to = oType === 'block' ? insertAt : src.blocks.length - 1
-                    return prev.map((s) =>
-                        s.id === src.id ? { ...s, blocks: arrayMove(s.blocks, from, to) } : s,
-                    )
-                }
-                const moved = src.blocks.find((b) => b.id === aId)
-                return prev.map((s) => {
-                    if (s.id === src.id) return { ...s, blocks: s.blocks.filter((b) => b.id !== aId) }
-                    if (s.id === target.id)
-                        return {
-                            ...s,
-                            blocks: [...s.blocks.slice(0, insertAt), moved, ...s.blocks.slice(insertAt)],
-                        }
-                    return s
-                })
-            }
-            return prev
+            const clean = (cols) => fromColumns(cols.filter((c) => c.length))
+            return prev.map((s) => {
+                if (s.id === target.id) return { ...s, blocks: clean(tCols) }
+                if (src && s.id === src.id) return { ...s, blocks: clean(sCols) }
+                return s
+            })
         })
     }
 
@@ -765,6 +1522,7 @@ export default function App() {
         }
     }
 
+    const editDev = devices.find((d) => d.id === editDevId)
     const onCount = devices.filter((d) => d.on).length
     const dockDevices = dockKind === 'devices'
 
@@ -778,7 +1536,7 @@ export default function App() {
     return (
         <DndContext
             sensors={sensors}
-            collisionDetection={closestCenter}
+            collisionDetection={collide}
             onDragStart={({ active }) => setActiveId(active.id)}
             onDragCancel={() => setActiveId(null)}
             onDragEnd={handleDragEnd}
@@ -796,8 +1554,11 @@ export default function App() {
                             scenarios={scenarios}
                             emergencies={emergencies}
                             sits={sits}
+                            tickets={tickets}
                             onStart={startEmergency}
                             onEnd={endEmergency}
+                            onTicket={addTicket}
+                            onCloseTicket={closeTicket}
                         />
                     )}
 
@@ -806,7 +1567,8 @@ export default function App() {
                             devices={devices}
                             onToggle={toggleDevice}
                             onRemove={removeDevice}
-                            onAdd={addDevice}
+                            onAdd={() => setAddDevOpen(true)}
+                            onEdit={setEditDevId}
                         />
                     )}
 
@@ -822,6 +1584,7 @@ export default function App() {
                             onAddCond={openAddCond}
                             onEditCond={openEditCond}
                             onRemoveCond={removeCond}
+                            onEditDevice={setEditDevId}
                         />
                     )}
                 </main>
@@ -909,6 +1672,17 @@ export default function App() {
                     onClose={() => setSheet(null)}
                 />
             )}
+
+            {editDev && (
+                <DeviceSheet
+                    key={editDev.id}
+                    device={editDev}
+                    onSave={saveDeviceParams}
+                    onClose={() => setEditDevId(null)}
+                />
+            )}
+
+            {addDevOpen && <AddDeviceSheet onSave={addDevice} onClose={() => setAddDevOpen(false)} />}
 
             {newSitOpen && (
                 <NewSituationSheet onSave={saveNewSituation} onClose={() => setNewSitOpen(false)} />

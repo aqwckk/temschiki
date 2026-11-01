@@ -1,4 +1,4 @@
-"""Доступы команды к стенду Ujin из доступы.json (файл в git не попадает)."""
+"""Доступы команды к стенду Ujin из доступы.json."""
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,10 +28,9 @@ class UjinCredentials:
 
 
 def load(path: Path) -> Optional[UjinCredentials]:
-    if not path.exists():
+    if not path.is_file():
         return None
     data = json.loads(path.read_text(encoding="utf-8"))
-    # устройства публикуются под ust резидента квартиры
     resident = data["residents"][0]
     devices = [
         UjinDevice(

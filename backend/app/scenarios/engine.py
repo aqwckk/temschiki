@@ -215,9 +215,6 @@ class ScenarioEngine:
             for block, error in zip(group, results):
                 steps.append({"block_id": block.id, "kind": block.kind, "ok": error == "", "error": error})
 
-        if situation is not None:
-            _notify_about(scenario, situation, condition)
-
         errors = [step["error"] for step in steps if step["error"]]
         if errors:
             journal.save_run(scenario.id, cause, "failed", errors[0], steps, started_at)
@@ -238,20 +235,15 @@ class ScenarioEngine:
             on = block.on
             if device_on is not None:
                 on = device_on
-            return await self._with_retry(scenario, lambda: controls.turn(block.device_id, on))
+            return await self._with_retry(lambda: controls.turn(block.device_id, on))
         if block.kind == "command":
-            return await self._with_retry(
-                scenario, lambda: self.emulators.command(block.device_id, block.signal, block.value)
-            )
-        if block.kind == "notify":
-            journal.add_notification(block.target, block.message, scenario.id)
-            return ""
+            return await self._with_retry(lambda: self.emulators.command(block.device_id, block.signal, block.value))
         if block.kind == "delay":
             await asyncio.sleep(block.seconds)
             return ""
         return f"неизвестное действие {block.kind}"
 
-    async def _with_retry(self, scenario: LoadedScenario, action) -> str:
+    async def _with_retry(self, action) -> str:
         error = ""
         for attempt in range(COMMAND_ATTEMPTS):
             try:
@@ -264,7 +256,6 @@ class ScenarioEngine:
             except (DeviceNotRunning, CommandRejected) as exc:
                 error = str(exc)
                 break
-        journal.add_notification("concierge", f"Сценарий «{scenario.title}»: {error}", scenario.id)
         return error
 
 
@@ -278,7 +269,10 @@ def _cause(situation: Situation, condition: SituationCondition) -> str:
 
 
 def _reaction_plan(blocks: list, condition: SituationCondition) -> tuple[list, Optional[bool]]:
-    """Что делать с устройствами по реакции условия: включить, выключить или не трогать."""
+    """Что делать с устройствами по реакции условия: включить, выключить или не трогать.
+
+    Остальные реакции (уведомление, поддержка, свое действие) обрабатывает фронт.
+    """
     if condition.action == "on":
         return blocks, True
     if condition.action == "off":
@@ -295,18 +289,6 @@ def _parallel_groups(blocks: list) -> list[list]:
         else:
             groups.append([block])
     return groups
-
-
-def _notify_about(scenario: LoadedScenario, situation: Situation, condition: Optional[SituationCondition]) -> None:
-    message = f"{situation.label}: сработал сценарий «{scenario.title}»"
-    if condition is not None and condition.action == "custom" and condition.action_text:
-        message = f"{situation.label}: {condition.action_text}"
-    journal.add_notification("resident", message, scenario.id)
-    # об авариях и обращениях в поддержку узнает консьерж
-    if condition is not None and condition.action == "support":
-        journal.add_notification("concierge", f"Обращение в техподдержку. {message}", scenario.id)
-    elif situation.alarm:
-        journal.add_notification("concierge", message, scenario.id)
 
 
 def _fired_trigger(scenario: LoadedScenario, device_id: int, name: str, old: Any, new: Any):

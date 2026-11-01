@@ -201,13 +201,3 @@ class UjinStatus(BaseModel):
     commands_applied: int = 0
     last_command: str = ""
     last_error: str
-
-
-class NotificationRead(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    id: int
-    target: str
-    message: str
-    scenario_id: Optional[int]
-    created_at: datetime

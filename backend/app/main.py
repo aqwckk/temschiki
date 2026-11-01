@@ -3,6 +3,8 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from app import demo
+from app.config import settings
 from app.db import SessionLocal, init_db
 from app.emulation.runtime import runtime
 from app.errors import register_error_handlers
@@ -30,6 +32,8 @@ async def lifespan(app: FastAPI):
         device_type_service.register_all(session)
         situation_service.register_all(session)
         device_service.start_all(session)
+        if settings.demo_seed:
+            demo.seed_if_empty(session)
         emergency_service.load_all(session)
         engine.start(loop, scenario_service.list_scenarios(session))
     await runtime.start()

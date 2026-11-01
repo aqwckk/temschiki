@@ -211,6 +211,3 @@ export function endEmergency(id) {
     return request('DELETE', `/emergencies/${id}`)
 }
 
-export async function getNotifications() {
-    return request('GET', '/notifications')
-}

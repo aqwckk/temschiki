@@ -1,5 +1,4 @@
 from datetime import datetime, timezone
-from typing import Optional
 
 from sqlalchemy import JSON, String
 from sqlalchemy.orm import Mapped, mapped_column
@@ -80,13 +79,3 @@ class ScenarioRun(Base):
     steps: Mapped[list] = mapped_column(JSON, default=list)
     started_at: Mapped[datetime] = mapped_column(default=utcnow)
     finished_at: Mapped[datetime] = mapped_column(default=utcnow)
-
-
-class Notification(Base):
-    __tablename__ = "notifications"
-
-    id: Mapped[int] = mapped_column(primary_key=True)
-    target: Mapped[str] = mapped_column(String(20))
-    message: Mapped[str] = mapped_column(String(300))
-    scenario_id: Mapped[Optional[int]] = mapped_column(default=None)
-    created_at: Mapped[datetime] = mapped_column(default=utcnow)

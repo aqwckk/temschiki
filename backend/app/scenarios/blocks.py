@@ -54,13 +54,6 @@ class CommandBlock(BaseModel):
     value: Union[int, float]
 
 
-class NotifyBlock(BaseModel):
-    id: str = Field(default_factory=new_block_id)
-    kind: Literal["notify"]
-    target: Literal["concierge", "resident"]
-    message: str = Field(min_length=1, max_length=300)
-
-
 class DelayBlock(BaseModel):
     id: str = Field(default_factory=new_block_id)
     kind: Literal["delay"]
@@ -92,14 +85,13 @@ Block = Annotated[
         Annotated[TriggerBlock, Tag("trigger")],
         Annotated[ConditionBlock, Tag("condition")],
         Annotated[CommandBlock, Tag("command")],
-        Annotated[NotifyBlock, Tag("notify")],
         Annotated[DelayBlock, Tag("delay")],
         Annotated[DeviceBlock, Tag("device")],
     ],
     Discriminator(_block_kind),
 ]
 
-ACTION_KINDS = ("device", "command", "notify", "delay")
+ACTION_KINDS = ("device", "command", "delay")
 
 
 Reaction = Literal["off", "on", "notify", "support", "none", "custom"]
@@ -108,8 +100,9 @@ Reaction = Literal["off", "on", "notify", "support", "none", "custom"]
 class SituationCondition(BaseModel):
     """Ситуация, влияющая на сценарий. Время - необязательное "во сколько".
 
-    action - что сделать, когда ситуация началась: выключить или включить устройства
-    сценария, прислать уведомление, обратиться в техподдержку, ничего или свое действие.
+    action - реакция, когда ситуация началась. Бэкенд выполняет on и off: включает или
+    выключает устройства сценария. notify, support, none и custom устройства не трогают,
+    их показывает фронт.
     """
 
     model_config = ConfigDict(populate_by_name=True)

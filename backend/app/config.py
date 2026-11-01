@@ -23,5 +23,8 @@ class Settings(BaseSettings):
     ujin_credentials_file: Path = BACKEND_DIR / "доступы.json"
     ujin_flush_interval: float = 3.0
 
+    # демо-квартира из кейса при первом запуске на пустой базе
+    demo_seed: bool = True
+
 
 settings = Settings()

@@ -20,10 +20,6 @@ def publish_run(run: dict) -> None:
     hub.publish({"type": "scenario_run", "run": run})
 
 
-def publish_notification(notification: dict) -> None:
-    hub.publish({"type": "notification", "notification": notification})
-
-
 def publish_emergency(emergency: dict) -> None:
     hub.publish({"type": "emergency_started", "emergency": emergency})
 
